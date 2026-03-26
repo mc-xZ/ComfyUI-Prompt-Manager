@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-prompt-manager"
+description = "A ComfyUI plugin for managing prompts independently from LoRA Manager"
+version = "1.0.0"
+license = {file = "LICENSE"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/willmiao/ComfyUI-Lora-Manager"
+
+[tool.comfy]
+PublisherId = "prompt-manager"
+DisplayName = "Prompt Manager"
+Icon = ""
