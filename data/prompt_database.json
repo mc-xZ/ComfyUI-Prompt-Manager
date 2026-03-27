@@ -1,0 +1,85 @@
+{
+  "models": {
+    "main_models": {
+      "illustrious": {
+        "id": "illustrious",
+        "name": "Illustrious",
+        "categories": [
+          {
+            "id": "custom",
+            "name": "自定义"
+          }
+        ],
+        "modes": {
+          "custom": {
+            "name": "自定义",
+            "icon": "✨",
+            "group": "custom"
+          }
+        }
+      },
+      "vexilapse-illustrious": {
+        "id": "vexilapse-illustrious",
+        "name": "Vexilapse-Illustrious",
+        "categories": [
+          {
+            "id": "vexilapse",
+            "name": "基础分类"
+          }
+        ],
+        "modes": {
+          "artists": {
+            "name": "画师",
+            "icon": "👨‍🎨",
+            "group": "vexilapse"
+          },
+          "characters": {
+            "name": "角色",
+            "icon": "🎭",
+            "group": "vexilapse"
+          },
+          "lighting": {
+            "name": "光效",
+            "icon": "💡",
+            "group": "vexilapse"
+          },
+          "niji": {
+            "name": "Niji",
+            "icon": "🎨",
+            "group": "vexilapse"
+          }
+        }
+      },
+      "anima": {
+        "id": "anima",
+        "name": "Anima",
+        "categories": [
+          {
+            "id": "default",
+            "name": "内置模式"
+          }
+        ],
+        "modes": {
+          "artists": {
+            "name": "画师",
+            "icon": "👨‍🎨",
+            "group": "default"
+          }
+        }
+      }
+    }
+  },
+  "settings": {},
+  "contexts": {
+    "illustrious_custom": {
+      "cart": [],
+      "groups": [],
+      "combos": [],
+      "metadata": {},
+      "items": [],
+      "imageCount": {},
+      "viewIndex": {}
+    }
+  },
+  "images": {}
+}

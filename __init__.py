@@ -1,86 +1,297 @@
 import os
+import shutil
 import server
 from aiohttp import web
 import json
+import torch
+import numpy as np
+from PIL import Image
+import base64
+import time
+import zipfile
 
-# 插件根目录
+# === 路径配置 ===
 NODE_ROOT = os.path.dirname(os.path.abspath(__file__))
-# 静态资源目录
 STATIC_DIR = os.path.join(NODE_ROOT, "static")
-# 让ComfyUI自动加载web/comfyui下的所有JS
 WEB_DIRECTORY = os.path.join(NODE_ROOT, "web", "comfyui")
 
-# 数据存储目录
 DATA_DIR = os.path.join(NODE_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "prompt_database.json")
+BACKUP_DIR = os.path.join(NODE_ROOT, "backup")
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# ============ API 路由 ============
+# ==========================================
+# 辅助函数：动态读取数据库中的分类 (显示为: [标签] 分类 = 模式)
+# ==========================================
+def get_target_contexts():
+    choices = []
+    try:
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                db = json.load(f)
+                models = db.get("models", {}).get("main_models", {})
+                for model_id, model_data in models.items():
+                    model_name = model_data.get("name", model_id)
+                    cats = {c.get("id"): c.get("name") for c in model_data.get("categories", [])}
+                    for mode_id, mode_data in model_data.get("modes", {}).items():
+                        mode_name = mode_data.get("name", mode_id)
+                        cat_id = mode_data.get("group", "custom")
+                        cat_name = cats.get(cat_id, "未分类")
+                        # 格式优化：隐藏了文件夹代码，直接展示中文名
+                        choices.append(f"[{model_name}] {cat_name} = {mode_name}")
+    except:
+        pass
+    if not choices:
+        choices = ["[Illustrious] 默认 = 自定义"]
+    return choices
 
-# 主页面路由
+# ==========================================
+# 节点 1：Prompt 浏览器 (删除了 batch_size)
+# ==========================================
+class PromptBrowserNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt_text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompt_string",)
+    FUNCTION = "process"
+    CATEGORY = "Prompt Manager"
+
+    def process(self, prompt_text):
+        return (prompt_text,)
+
+# ==========================================
+# 节点 2：Prompt 一键导入 (纯输入，反查真实 ctx)
+# ==========================================
+class PromptImportNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "prompt_text": ("STRING", {"forceInput": True}),
+                "save_target": (get_target_contexts(), ),
+            }
+        }
+    RETURN_TYPES = ()
+    FUNCTION = "save_images"
+    OUTPUT_NODE = True
+    CATEGORY = "Prompt Manager"
+
+    def save_images(self, images, prompt_text, save_target):
+        safe_name = prompt_text.strip()
+        if not safe_name: return ()
+            
+        file_safe_name = "".join([c for c in safe_name if c.isalnum()]).rstrip()[:20]
+
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, 'r', encoding='utf-8') as f: db_data = json.load(f)
+        else:
+            db_data = {"contexts": {}, "images": {}}
+
+        # 反查真实路径上下文 (通过下拉框的选择反推内部 ID)
+        target_ctx = "illustrious_custom" 
+        models = db_data.get("models", {}).get("main_models", {})
+        for model_id, model_data in models.items():
+            m_name = model_data.get("name", model_id)
+            cats = {c.get("id"): c.get("name") for c in model_data.get("categories", [])}
+            for mode_id, mode_data in model_data.get("modes", {}).items():
+                c_name = cats.get(mode_data.get("group", "custom"), "未分类")
+                md_name = mode_data.get("name", mode_id)
+                check_str = f"[{m_name}] {c_name} = {md_name}"
+                if check_str == save_target:
+                    target_ctx = f"{model_id}_{mode_id}"
+                    break
+        
+        ctx = target_ctx
+
+        if "contexts" not in db_data: db_data["contexts"] = {}
+        if "images" not in db_data: db_data["images"] = {}
+        if ctx not in db_data["contexts"]:
+            db_data["contexts"][ctx] = {"items": [], "metadata": {}, "cart": [], "groups": [], "combos": []}
+            
+        ctx_data = db_data["contexts"][ctx]
+        if safe_name not in ctx_data["items"]: ctx_data["items"].append(safe_name)
+        if safe_name not in ctx_data["metadata"]: ctx_data["metadata"][safe_name] = {"tags": []}
+            
+        img_key = f"{ctx}_{safe_name}"
+        if img_key not in db_data["images"]: db_data["images"][img_key] = []
+            
+        target_dir = os.path.join(DATA_DIR, ctx)
+        os.makedirs(target_dir, exist_ok=True)
+        
+        saved_count = 0
+        for i, image_tensor in enumerate(images):
+            img_np = 255. * image_tensor.cpu().numpy()
+            img_pil = Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+            img_name = f"gen_{file_safe_name}_{torch.randint(0, 100000, (1,)).item()}.png"
+            img_path = os.path.join(target_dir, img_name)
+            
+            img_pil.save(img_path)
+            url = f"/prompt_data/{ctx}/{img_name}"
+            
+            db_data["images"][img_key].append(url)
+            saved_count += 1
+            
+        ctx_data["metadata"][safe_name]["imgCount"] = len(db_data["images"][img_key])
+        
+        with open(DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(db_data, f, ensure_ascii=False, indent=2)
+            
+        print(f"[Prompt Manager] 导入成功: 目标 [{save_target}] -> {safe_name}")
+        return ()
+
+# ==========================================
+# 下方为所有的路由保持不变，直接沿用你之前的即可
+# ==========================================
+@server.PromptServer.instance.routes.get("/prompt_data/{path:.*}")
+async def serve_data_dir(request):
+    path = request.match_info["path"]
+    file_path = os.path.abspath(os.path.join(DATA_DIR, path))
+    if os.path.exists(file_path) and file_path.startswith(DATA_DIR): return web.FileResponse(file_path)
+    return web.Response(status=404)
+
+@server.PromptServer.instance.routes.get("/api/prompt-manager/db")
+async def get_db(request):
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f: return web.json_response(json.load(f))
+        except: pass
+    return web.json_response({})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/db")
+async def save_db(request):
+    try:
+        data = await request.json()
+        with open(DB_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, ensure_ascii=False, indent=2)
+        return web.json_response({"success": True})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/upload")
+async def upload_image(request):
+    try:
+        data = await request.json()
+        image_base64 = data.get("image")
+        filename = data.get("filename")
+        subfolder = data.get("subfolder", "")
+
+        if image_base64 and filename:
+            if "," in image_base64: image_base64 = image_base64.split(",")[1]
+            img_data = base64.b64decode(image_base64)
+            target_dir = DATA_DIR
+            if subfolder:
+                # 兼容中文的合法化
+                safe_subfolder = "".join([c for c in subfolder if c.isalnum() or '\u4e00' <= c <= '\u9fff' or c in ('_', '-')])
+                target_dir = os.path.join(DATA_DIR, safe_subfolder)
+                os.makedirs(target_dir, exist_ok=True)
+            
+            filepath = os.path.join(target_dir, filename)
+            with open(filepath, "wb") as f: f.write(img_data)
+            
+            url_path = f"{safe_subfolder}/{filename}" if subfolder else filename
+            return web.json_response({"success": True, "url": f"/prompt_data/{url_path}"})
+        return web.json_response({"success": False, "error": "Missing data"})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/delete_file")
+async def delete_file(request):
+    try:
+        data = await request.json()
+        file_url = data.get("url")
+        if file_url and file_url.startswith("/prompt_data/"):
+            relative_path = file_url.replace("/prompt_data/", "")
+            if ".." in relative_path: return web.json_response({"success": False})
+            filepath = os.path.join(DATA_DIR, relative_path)
+            if os.path.exists(filepath): os.remove(filepath)
+            return web.json_response({"success": True})
+        return web.json_response({"success": False, "error": "Invalid file"})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/delete_folder")
+async def delete_folder(request):
+    try:
+        data = await request.json()
+        folder = data.get("folder")
+        if folder:
+            safe_folder = "".join([c for c in folder if c.isalnum() or '\u4e00' <= c <= '\u9fff' or c in ('_', '-')])
+            folder_path = os.path.join(DATA_DIR, safe_folder)
+            if os.path.exists(folder_path) and os.path.isdir(folder_path):
+                shutil.rmtree(folder_path)
+                return web.json_response({"success": True})
+        return web.json_response({"success": False})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/format")
+async def format_plugin(request):
+    try:
+        for item in os.listdir(DATA_DIR):
+            item_path = os.path.join(DATA_DIR, item)
+            if os.path.isfile(item_path): os.remove(item_path)
+            elif os.path.isdir(item_path): shutil.rmtree(item_path)
+        return web.json_response({"success": True})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/backup/create")
+async def create_backup(request):
+    try:
+        data = await request.json()
+        name = data.get("name", f"Backup_{int(time.time())}")
+        safe_name = "".join([c for c in name if c.isalnum() or '\u4e00' <= c <= '\u9fff' or c in ('_', '-')])
+        zip_filename = f"{safe_name}.zip"
+        zip_path = os.path.join(BACKUP_DIR, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(DATA_DIR):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, DATA_DIR)
+                    zipf.write(file_path, arcname)
+        return web.json_response({"success": True, "filename": zip_filename})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.get("/api/prompt-manager/backup/list")
+async def list_backups(request):
+    try:
+        backups = []
+        if os.path.exists(BACKUP_DIR):
+            for f in os.listdir(BACKUP_DIR):
+                if f.endswith(".zip"):
+                    file_path = os.path.join(BACKUP_DIR, f)
+                    size_mb = round(os.path.getsize(file_path) / (1024 * 1024), 2)
+                    mtime = os.path.getmtime(file_path)
+                    backups.append({"name": f, "size": size_mb, "time": mtime})
+        backups.sort(key=lambda x: x["time"], reverse=True)
+        return web.json_response({"success": True, "backups": backups})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
+@server.PromptServer.instance.routes.post("/api/prompt-manager/backup/restore")
+async def restore_backup(request):
+    try:
+        data = await request.json()
+        filename = data.get("filename")
+        if not filename or ".." in filename: return web.json_response({"success": False})
+        zip_path = os.path.join(BACKUP_DIR, filename)
+        if not os.path.exists(zip_path): return web.json_response({"success": False, "error": "Backup file not found"})
+        for item in os.listdir(DATA_DIR):
+            item_path = os.path.join(DATA_DIR, item)
+            if os.path.isfile(item_path): os.remove(item_path)
+            elif os.path.isdir(item_path): shutil.rmtree(item_path)
+        with zipfile.ZipFile(zip_path, 'r') as zipf: zipf.extractall(DATA_DIR)
+        return web.json_response({"success": True})
+    except Exception as e: return web.json_response({"success": False, "error": str(e)})
+
 @server.PromptServer.instance.routes.get("/prompt")
-async def serve_prompt_page(request):
-    return web.FileResponse(os.path.join(STATIC_DIR, "prompt", "Prompt.html"))
-
-# 静态资源路由
+async def serve_prompt_page(request): return web.FileResponse(os.path.join(STATIC_DIR, "prompt", "Prompt.html"))
 @server.PromptServer.instance.routes.get("/prompt_static/{path:.*}")
 async def serve_prompt_static(request):
     path = request.match_info["path"]
     file_path = os.path.join(STATIC_DIR, path)
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        return web.FileResponse(file_path)
+    if os.path.exists(file_path): return web.FileResponse(file_path)
     return web.Response(status=404)
 
-# 数据API - 获取配置
-@server.PromptServer.instance.routes.get("/api/prompt-manager/config")
-async def get_config(request):
-    config_path = os.path.join(DATA_DIR, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return web.json_response(json.load(f))
-    return web.json_response({"success": True, "data": {}})
-
-# 数据API - 保存配置
-@server.PromptServer.instance.routes.post("/api/prompt-manager/config")
-async def save_config(request):
-    try:
-        data = await request.json()
-        config_path = os.path.join(DATA_DIR, "config.json")
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return web.json_response({"success": True})
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-# 数据API - 导出数据
-@server.PromptServer.instance.routes.get("/api/prompt-manager/export")
-async def export_data(request):
-    try:
-        # 这里可以导出IndexedDB数据到服务器
-        return web.json_response({"success": True, "message": "请使用浏览器导出功能"})
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-# 数据API - 导入数据
-@server.PromptServer.instance.routes.post("/api/prompt-manager/import")
-async def import_data(request):
-    try:
-        data = await request.json()
-        # 这里可以处理从服务器导入的数据
-        return web.json_response({"success": True})
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-# 版本信息API
-@server.PromptServer.instance.routes.get("/api/prompt-manager/version")
-async def get_version(request):
-    return web.json_response({
-        "success": True,
-        "version": "1.0.0",
-        "name": "Prompt Manager"
-    })
-
-# 插件标识
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
-
-print("[Prompt Manager] 插件加载完成 | 访问地址: http://127.0.0.1:8188/prompt")
+NODE_CLASS_MAPPINGS = {"PromptBrowserNode": PromptBrowserNode, "PromptImportNode": PromptImportNode}
+NODE_DISPLAY_NAME_MAPPINGS = {"PromptBrowserNode": "Prompt浏览器", "PromptImportNode": "Prompt一键导入"}

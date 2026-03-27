@@ -405,8 +405,8 @@
                 <span class="arrow">▼</span>
             </div>
             <div class="section-content">
-                <button class="btn-side" onclick="document.getElementById('importFileInput').click()"><span>📤</span> 导入数据(JSON)</button>
-                <button class="btn-side" onclick="openExportModal()"><span>💾</span> 导出数据中心(JSON)</button>
+                <button class="btn-side" onclick="document.getElementById('importFileInput').click()"><span>📤</span> 导入数据</button>
+                <button class="btn-side" onclick="openExportModal()"><span>💾</span> 导出数据</button>
                 <button class="btn-side" onclick="exportToTxt()"><span>📄</span> 导出名称列表(TXT)</button>
                 <button class="btn-side" onclick="openBackupModal()"><span>🔄</span> 备份管理</button>
             </div>
@@ -999,21 +999,43 @@
         </div>
     </div>
 
+    <!-- 备份管理弹窗：已修改为全局备份模式 -->
     <div class="modal-overlay" id="backupModal">
         <div class="modal">
-            <div class="modal-header"><div class="modal-title">备份管理</div><button class="modal-close" onclick="hideModal('backupModal')">×</button></div>
+            <div class="modal-header">
+                <div class="modal-title">💾 全局备份管理</div>
+                <button class="modal-close" onclick="hideModal('backupModal')">×</button>
+            </div>
             <div class="modal-body">
-                <button class="btn btn-primary" style="width:100%; margin-bottom:15px;" onclick="createBackup()">创建当前(小分类)状态备份</button>
-                <div id="backupList"></div>
+                <div style="background: var(--primary-bg); padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px dashed var(--primary-light);">
+                    <p style="font-size: 0.85rem; color: var(--text-main); font-weight: bold; margin-bottom: 5px;">📍 备份说明：</p>
+                    <p style="font-size: 0.8rem; color: var(--text-light); line-height: 1.4;">
+                        1. 此功能将备份<b>整个插件</b>的所有标签页、配置及图片。<br>
+                        2. 备份文件存放在：<br>
+                        <code style="background:rgba(0,0,0,0.1); padding:2px 4px; border-radius:3px; word-break:break-all;">custom_nodes\ComfyUI-Prompt-Manager-main\backup</code><br>
+                        3. 如需释放硬盘空间，请手动前往上述目录删除旧的 ZIP 文件。
+                    </p>
+                </div>
+                
+                <button class="btn btn-primary" style="width:100%; margin-bottom:15px; font-size: 1rem; padding: 12px;" onclick="createBackup()">
+                    ✨ 创建全库数据快照 (ZIP)
+                </button>
+
+                <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
+                    <p style="font-weight: bold; margin-bottom: 10px; font-size: 0.9rem;">历史备份列表：</p>
+                    <div id="backupList">
+                        <!-- 备份项将通过 JS 动态插入到这里 -->
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
-    <div class="modal-overlay" id="fullscreenOverlay">
-        <div class="modal lightbox-modal">
+    <div class="modal-overlay" id="fullscreenOverlay" style="z-index: 10000;" onclick="hideModal('fullscreenOverlay')">
+        <div class="lightbox-modal">
             <button class="lightbox-close" onclick="hideModal('fullscreenOverlay')">×</button>
-            <div class="modal-body lightbox-body" onclick="hideModal('fullscreenOverlay')">
-                <img src="" class="lightbox-img" id="fsImage" onclick="event.stopPropagation()">
+            <div class="lightbox-body">
+                <img id="fsImage" class="lightbox-img" src="" onclick="event.stopPropagation()">
             </div>
         </div>
     </div>
@@ -1021,6 +1043,30 @@
     <div class="toast" id="toast"></div>
 
 <script>
+    let globalDB = { models: {}, settings: {}, contexts: {}, images: {} };
+    let syncTimeout = null;
+
+    function syncDB() {
+        clearTimeout(syncTimeout);
+        syncTimeout = setTimeout(async () => {
+            try {
+                await fetch('/api/prompt-manager/db', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(globalDB)
+                });
+            } catch (e) { console.error('保存数据库失败', e); }
+        }, 500);
+    }
+
+    async function deletePhysicalFile(url) {
+        if(!url) return;
+        try {
+            await fetch('/api/prompt-manager/delete_file', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: url })
+            });
+        } catch(e) {}
+    }
+
     function escapeHtml(unsafe) {
         if(typeof unsafe !== 'string') return unsafe;
         return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
@@ -1028,11 +1074,7 @@
 
     function sanitizePrompt(str) {
         if(typeof str !== 'string') return str;
-        try {
-            return decodeURIComponent(str);
-        } catch(e) {
-            return str; 
-        }
+        try { return decodeURIComponent(str); } catch(e) { return str; }
     }
 
     function hexToRgb(hex) {
@@ -1056,42 +1098,26 @@
     let compressSettings = { quality: 0.85, maxWidth: 900 };
     
     let uiConfig = {
-        themeColor: '#ff6b9d',
-        cornerStyle: 'rounded',
-        isNight: false,
-        bgOpacity: 50,
-        bgBlur: 10,
-        bgImage: '',
-        cardOpacity: 95,
-        showBadges: true
+        themeColor: '#ff6b9d', cornerStyle: 'rounded', isNight: false,
+        bgOpacity: 50, bgBlur: 10, bgImage: '', cardOpacity: 95, showBadges: true
     };
 
-    let devNotesText = "长期更新事项\n①.数据储存方式为浏览器IndexedDB，考虑更改为可自定义路径的储存方式\n②.如果有可能可以添加个工作流直接导入提示词或者生图后导出到指定路径进行批量添加\n③.并入Stable Diffusion 法术解析的开源功能，读取图片prompt";
+    let devNotesText = "数据已成功迁移至本地硬盘！\n每次节点跑完图，点击“打开 Prompt 浏览器”会瞬间即时刷新图库！\n支持智能合并及覆盖数据的强大导入系统已修复！";
 
     let renderToken = 0;
     let currentFilteredItems = []; 
-    let virtualGrid = {
-        cardWidth: 280,
-        cardHeight: 400,
-        gap: 20,
-        cols: 1,
-        bufferRows: 3
-    };
+    let virtualGrid = { cardWidth: 280, cardHeight: 400, gap: 20, cols: 1, bufferRows: 3 };
     let activeCards = new Map(); 
     let isScrollTicking = false;
 
-    let db;
-    const DB_NAME = 'LORA_Database_V2'; 
-    const DB_VERSION = 1;
-    const STORE_IMG = 'items';
-    const STORE_LIST = 'itemsList';
-    const STORE_CART = 'cart';
-    const STORE_GROUPS = 'groups';
-    const STORE_METADATA = 'metadata';
-    const STORE_BACKUP = 'backups';
-    const STORE_MODELS = 'models';
-    const STORE_SETTING = 'settings';
-    const STORE_COMBOS = 'combinations';
+    // === 问题2解决核心：监听外部传来的刷新信号 ===
+    window.addEventListener("message", async (e) => {
+        if (e.data && e.data.type === "RELOAD_DB") {
+            await initDB();
+            triggerSearch(true); 
+            console.log("[Prompt Browser] 数据已即时刷新");
+        }
+    });
 
     document.addEventListener('DOMContentLoaded', () => {
         initSidebarAcc();
@@ -1100,12 +1126,24 @@
             switchModel(currentModelId, true);
             checkTutorial();
         });
-        
-        if(localStorage.getItem('sidebarCollapsed') === 'true') {
+        if(localStorage.getItem('sidebarCollapsed') !== 'false') {
             document.body.classList.add('sidebar-collapsed');
             document.getElementById('sidebarToggle').innerText = '▶';
         }
     });
+
+    async function initDB() {
+        try {
+            const res = await fetch('/api/prompt-manager/db');
+            const data = await res.json();
+            if (data && Object.keys(data).length > 0) globalDB = data;
+            if (!globalDB.contexts) globalDB.contexts = {};
+            if (!globalDB.images) globalDB.images = {};
+            if (!globalDB.settings) globalDB.settings = {};
+            if (!globalDB.models) globalDB.models = {};
+        } catch (e) { console.error("加载本地数据库失败，初始化空白库", e); }
+        await loadSettings(); await loadModels();
+    }
 
     function showProgress(title, subtext='') { 
         document.getElementById('gpTitle').innerText = title; 
@@ -1131,15 +1169,11 @@
     function initSidebarAcc() {
         const statesStr = localStorage.getItem('sidebarStates');
         let states = statesStr ? JSON.parse(statesStr) : { 'sec_mode': true };
-        
         document.querySelectorAll('.section').forEach((sec) => {
             const id = sec.getAttribute('data-id');
             const title = sec.querySelector('.section-title');
             if(!id) return;
-            
-            if (states[id] === true) sec.classList.add('open');
-            else sec.classList.remove('open');
-            
+            if (states[id] === true) sec.classList.add('open'); else sec.classList.remove('open');
             title.onclick = () => {
                 sec.classList.toggle('open');
                 states[id] = sec.classList.contains('open');
@@ -1148,72 +1182,25 @@
         });
     }
 
-    function toggleSubAccordion(id) {
-        document.getElementById(id).classList.toggle('open');
-    }
-
-    function checkTutorial() {
-        if(!localStorage.getItem('hidePromptV2Tutorial')) showModal('tutorialModal');
-    }
-    function closeTutorial() {
-        if(document.getElementById('hideTutorialCheck').checked) localStorage.setItem('hidePromptV2Tutorial', 'true');
-        hideModal('tutorialModal');
-    }
-
-    function initDB() {
-        return new Promise((resolve, reject) => {
-            const req = indexedDB.open(DB_NAME, DB_VERSION);
-            req.onupgradeneeded = e => {
-                const d = e.target.result;
-                if(!d.objectStoreNames.contains(STORE_IMG)) d.createObjectStore(STORE_IMG, { keyPath: 'id' });
-                if(!d.objectStoreNames.contains(STORE_LIST)) d.createObjectStore(STORE_LIST, { keyPath: 'id' });
-                if(!d.objectStoreNames.contains(STORE_CART)) d.createObjectStore(STORE_CART, { keyPath: 'id' });
-                if(!d.objectStoreNames.contains(STORE_GROUPS)) { const st = d.createObjectStore(STORE_GROUPS, { keyPath: 'id', autoIncrement: true }); st.createIndex('mode', 'mode', { unique: false }); }
-                if(!d.objectStoreNames.contains(STORE_COMBOS)) { const st = d.createObjectStore(STORE_COMBOS, { keyPath: 'id', autoIncrement: true }); st.createIndex('mode', 'mode', { unique: false }); }
-                if(!d.objectStoreNames.contains(STORE_METADATA)) d.createObjectStore(STORE_METADATA, { keyPath: 'id' });
-                if(!d.objectStoreNames.contains(STORE_BACKUP)) { const st = d.createObjectStore(STORE_BACKUP, { keyPath: 'id', autoIncrement: true }); st.createIndex('mode', 'mode', { unique: false }); }
-                if(!d.objectStoreNames.contains(STORE_MODELS)) d.createObjectStore(STORE_MODELS, { keyPath: 'id' });
-                if(!d.objectStoreNames.contains(STORE_SETTING)) d.createObjectStore(STORE_SETTING, { keyPath: 'id' });
-            };
-            req.onsuccess = async e => {
-                db = e.target.result;
-                await loadSettings();
-                await loadModels();
-                resolve();
-            };
-            req.onerror = () => { console.error("DB Error"); resolve(); };
-        });
-    }
+    function toggleSubAccordion(id) { document.getElementById(id).classList.toggle('open'); }
+    function checkTutorial() { if(!localStorage.getItem('hidePromptV2Tutorial')) showModal('tutorialModal'); }
+    function closeTutorial() { if(document.getElementById('hideTutorialCheck').checked) localStorage.setItem('hidePromptV2Tutorial', 'true'); hideModal('tutorialModal'); }
 
     async function clearContextData(ctx) {
-        const stores = [STORE_LIST, STORE_CART, STORE_METADATA];
-        for(let st of stores) {
-            await new Promise(res => {
-                const req = db.transaction([st], 'readwrite').objectStore(st).delete(ctx);
-                req.onsuccess = res; req.onerror = res;
+        if (globalDB.contexts[ctx]) {
+            globalDB.contexts[ctx].items.forEach(item => {
+                const imgKey = ctx + '_' + item;
+                delete globalDB.images[imgKey];
             });
+            delete globalDB.contexts[ctx];
+            syncDB();
+            try {
+                await fetch('/api/prompt-manager/delete_folder', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder: ctx })
+                });
+            } catch(e) {}
         }
-        const indexStores = [STORE_GROUPS, STORE_COMBOS];
-        for(let st of indexStores) {
-            await new Promise(res => {
-                const tx = db.transaction([st], 'readwrite');
-                const store = tx.objectStore(st);
-                store.index('mode').openCursor(IDBKeyRange.only(ctx)).onsuccess = e => {
-                    const cursor = e.target.result;
-                    if(cursor) { cursor.delete(); cursor.continue(); }
-                    else res();
-                };
-            });
-        }
-        await new Promise(res => {
-            const tx = db.transaction([STORE_IMG], 'readwrite');
-            const store = tx.objectStore(STORE_IMG);
-            const range = IDBKeyRange.bound(`${ctx}_`, `${ctx}_\uffff`);
-            store.openCursor(range).onsuccess = e => {
-                const cursor = e.target.result;
-                if(cursor) { cursor.delete(); cursor.continue(); } else res();
-            };
-        });
     }
 
     function applyThemeToDOM() {
@@ -1227,19 +1214,13 @@
         document.documentElement.style.setProperty('--primary-light', `rgba(${rgbObj.r},${rgbObj.g},${rgbObj.b}, 0.5)`);
         document.documentElement.style.setProperty('--primary-bg', `rgba(${rgbObj.r},${rgbObj.g},${rgbObj.b}, 0.1)`);
 
-        if(uiConfig.cornerStyle === 'sharp') document.body.classList.add('theme-sharp');
-        else document.body.classList.remove('theme-sharp');
-
-        if(uiConfig.isNight) document.body.classList.add('theme-night');
-        else document.body.classList.remove('theme-night');
-        
-        if(uiConfig.showBadges === false) document.body.classList.add('hide-badges');
-        else document.body.classList.remove('hide-badges');
+        if(uiConfig.cornerStyle === 'sharp') document.body.classList.add('theme-sharp'); else document.body.classList.remove('theme-sharp');
+        if(uiConfig.isNight) document.body.classList.add('theme-night'); else document.body.classList.remove('theme-night');
+        if(uiConfig.showBadges === false) document.body.classList.add('hide-badges'); else document.body.classList.remove('hide-badges');
 
         const appBg = document.getElementById('appBg');
-        if(uiConfig.bgImage) {
-            appBg.style.backgroundImage = `url(${uiConfig.bgImage})`;
-        } else {
+        if(uiConfig.bgImage) appBg.style.backgroundImage = `url(${uiConfig.bgImage})`;
+        else {
             appBg.style.backgroundImage = 'var(--bg-gradient)';
             if (!uiConfig.isNight) {
                 const bgGrad = `linear-gradient(135deg, rgba(${rgbObj.r}, ${rgbObj.g}, ${rgbObj.b}, 0.15) 0%, rgba(${rgbObj.r}, ${rgbObj.g}, ${rgbObj.b}, 0.35) 100%)`;
@@ -1256,8 +1237,7 @@
         document.documentElement.style.setProperty('--bg-blur', `${uiConfig.bgBlur}px`);
         
         const cOp = (uiConfig.cardOpacity !== undefined ? uiConfig.cardOpacity : 95) / 100;
-        const gOp = Math.max(0, cOp - 0.1);
-        const isNight = uiConfig.isNight;
+        const gOp = Math.max(0, cOp - 0.1); const isNight = uiConfig.isNight;
         document.documentElement.style.setProperty('--card-bg', isNight ? `rgba(40, 30, 35, ${cOp})` : `rgba(255, 255, 255, ${cOp})`);
         document.documentElement.style.setProperty('--glass-bg', isNight ? `rgba(26, 16, 20, ${gOp})` : `rgba(255, 255, 255, ${gOp})`);
 
@@ -1265,330 +1245,178 @@
         document.getElementById('modalThemeToggleBtn').innerText = `${uiConfig.isNight?'☀️ 切换日间模式':'🌙 切换夜间模式'}`;
     }
 
-    function loadSettings() {
-        return new Promise(res => {
-            db.transaction([STORE_SETTING]).objectStore(STORE_SETTING).get('compress').onsuccess = e => { if(e.target.result) compressSettings = e.target.result.data; };
-            db.transaction([STORE_SETTING]).objectStore(STORE_SETTING).get('devNotes').onsuccess = e => { if(e.target.result) devNotesText = e.target.result.data; renderDevNotes(); };
-            db.transaction([STORE_SETTING]).objectStore(STORE_SETTING).get('uiConfig').onsuccess = e => {
-                if(e.target.result) uiConfig = { ...uiConfig, ...e.target.result.data };
-                if(uiConfig.showBadges === undefined) uiConfig.showBadges = true;
-                if(uiConfig.cardOpacity === undefined) uiConfig.cardOpacity = 95;
-                applyThemeToDOM();
-            };
-            res();
-        });
+    async function loadSettings() {
+        if(globalDB.settings.compress) compressSettings = globalDB.settings.compress;
+        if(globalDB.settings.devNotes) devNotesText = globalDB.settings.devNotes;
+        if(globalDB.settings.uiConfig) {
+            uiConfig = { ...uiConfig, ...globalDB.settings.uiConfig };
+            if(uiConfig.showBadges === undefined) uiConfig.showBadges = true;
+            if(uiConfig.cardOpacity === undefined) uiConfig.cardOpacity = 95;
+        }
+        renderDevNotes(); applyThemeToDOM();
     }
     
     function saveSettings() { 
-        db.transaction([STORE_SETTING], 'readwrite').objectStore(STORE_SETTING).put({ id: 'compress', data: compressSettings }); 
-        db.transaction([STORE_SETTING], 'readwrite').objectStore(STORE_SETTING).put({ id: 'uiConfig', data: uiConfig }); 
+        globalDB.settings.compress = compressSettings; globalDB.settings.uiConfig = uiConfig; globalDB.settings.devNotes = devNotesText; syncDB();
     }
 
-    function renderDevNotes() {
-        document.getElementById('devNotesDisplay').innerText = devNotesText;
-    }
+    function renderDevNotes() { document.getElementById('devNotesDisplay').innerText = devNotesText; }
     
     function editDevNotes() {
         document.getElementById('devNotesDisplay').style.display = 'none';
-        const ta = document.getElementById('devNotesEdit');
-        ta.style.display = 'block';
-        ta.value = devNotesText;
-        document.getElementById('btnEditDevNotes').style.display = 'none';
-        document.getElementById('btnSaveDevNotes').style.display = 'flex';
+        const ta = document.getElementById('devNotesEdit'); ta.style.display = 'block'; ta.value = devNotesText;
+        document.getElementById('btnEditDevNotes').style.display = 'none'; document.getElementById('btnSaveDevNotes').style.display = 'flex';
     }
 
     function saveDevNotes() {
-        devNotesText = document.getElementById('devNotesEdit').value;
-        db.transaction([STORE_SETTING], 'readwrite').objectStore(STORE_SETTING).put({ id: 'devNotes', data: devNotesText });
-        document.getElementById('devNotesDisplay').style.display = 'block';
-        document.getElementById('devNotesEdit').style.display = 'none';
-        document.getElementById('btnEditDevNotes').style.display = 'flex';
-        document.getElementById('btnSaveDevNotes').style.display = 'none';
-        renderDevNotes();
-        showToast('注意事项已保存');
+        devNotesText = document.getElementById('devNotesEdit').value; saveSettings();
+        document.getElementById('devNotesDisplay').style.display = 'block'; document.getElementById('devNotesEdit').style.display = 'none';
+        document.getElementById('btnEditDevNotes').style.display = 'flex'; document.getElementById('btnSaveDevNotes').style.display = 'none';
+        renderDevNotes(); showToast('注意事项已保存');
     }
 
     async function loadModels() {
-        return new Promise(res => {
-            db.transaction([STORE_MODELS]).objectStore(STORE_MODELS).get('main_models').onsuccess = async e => {
-                if(e.target.result) { 
-                    MODELS = e.target.result.data; 
-                    let needSave = false;
-
-                    Object.keys(MODELS).forEach(modelId => {
-                        if (!MODELS[modelId].categories) {
-                            needSave = true;
-                            MODELS[modelId].categories = [
-                                { id: 'vexilapse', name: '预设画风' },
-                                { id: 'default', name: '默认模式' },
-                                { id: 'custom', name: '自定义' }
-                            ];
-                        }
-
-                        Object.entries(MODELS[modelId].modes).forEach(([modeId, mode]) => {
-                            if (!mode.group) {
-                                needSave = true;
-                                if (modelId === 'vexilapse-illustrious' && ['artists', 'characters', 'lighting', 'niji'].includes(modeId)) mode.group = 'vexilapse';
-                                else if (modelId === 'illustrious' && ['artists', 'characters', 'lighting', 'niji'].includes(modeId)) mode.group = 'vexilapse';
-                                else if (modelId === 'anima' && ['artists'].includes(modeId)) mode.group = 'default';
-                                else mode.group = 'custom';
-                            }
-                        });
-                    });
-                    
-                    if(needSave) saveModels();
-                    
-                    let savedModelId = localStorage.getItem('lastModelId');
-                    let savedModeId = localStorage.getItem('lastModeId');
-
-                    if (savedModelId && MODELS[savedModelId]) {
-                        currentModelId = savedModelId;
-                        if (savedModeId && MODELS[savedModelId].modes[savedModeId]) {
-                            currentModeId = savedModeId;
-                        } else {
-                            currentModeId = Object.keys(MODELS[savedModelId].modes)[0];
-                        }
-                    } else {
-                        currentModelId = 'illustrious';
-                        if (MODELS['illustrious'] && Object.keys(MODELS['illustrious'].modes).length > 0) {
-                            currentModeId = Object.keys(MODELS['illustrious'].modes)[0];
-                        } else {
-                            currentModelId = Object.keys(MODELS)[0];
-                            currentModeId = Object.keys(MODELS[currentModelId].modes)[0];
-                        }
-                    }
-                    
-                } else {
-                    MODELS = {
-                        'illustrious': { id: 'illustrious', name: 'Illustrious', categories:[{id:'custom', name:'自定义'}], modes: { custom: {name:'自定义', icon:'✨', group:'custom'} } },
-                        'vexilapse-illustrious': { 
-                            id: 'vexilapse-illustrious', name: 'Vexilapse-Illustrious', 
-                            categories:[{id:'vexilapse', name:'基础分类'}],
-                            modes: { artists: {name:'画师', icon:'👨‍🎨', group:'vexilapse'}, characters: {name:'角色', icon:'🎭', group:'vexilapse'}, lighting: {name:'光效', icon:'💡', group:'vexilapse'}, niji: {name:'Niji', icon:'🎨', group:'vexilapse'} } 
-                        },
-                        'anima': { id: 'anima', name: 'Anima', categories:[{id:'default', name:'内置模式'}], modes: { artists: {name:'画师', icon:'👨‍🎨', group:'default'} } }
-                    };
-                    saveModels();
-                    
-                    currentModelId = 'illustrious';
-                    currentModeId = 'custom';
+        if (globalDB.models.main_models) {
+            MODELS = globalDB.models.main_models; let needSave = false;
+            Object.keys(MODELS).forEach(modelId => {
+                if (!MODELS[modelId].categories) {
+                    needSave = true; MODELS[modelId].categories = [{ id: 'vexilapse', name: '预设画风' }, { id: 'default', name: '默认模式' }, { id: 'custom', name: '自定义' }];
                 }
-                res();
-            };
-        });
-    }
-    function saveModels() { db.transaction([STORE_MODELS], 'readwrite').objectStore(STORE_MODELS).put({ id: 'main_models', data: MODELS }); }
-
-    function formatPlugin() {
-        if(!confirm('🧨 警告：格式化将永久删除您的所有模型、卡片、图片和配置，恢复到最初状态！此操作不可逆！\n\n确认要格式化吗？')) return;
-        if(!confirm('请最后一次确认，真的要格式化插件吗？(这清空您的所有本地缓存)')) return;
-        
-        db.close();
-        const req = indexedDB.deleteDatabase(DB_NAME);
-        req.onsuccess = () => { localStorage.clear(); alert('插件已格式化完毕，即将重启页面。'); location.reload(); };
-        req.onerror = () => { alert('格式化失败，请重试或手动清除浏览器缓存。'); };
-        req.onblocked = () => { alert('数据库被占用，请关闭所有相关标签页后重试。'); location.reload(); };
-    }
-
-    function saveContextCore(ctx) {
-        ctx = ctx || getContext();
-        const d = contextData[ctx];
-        const tx = db.transaction([STORE_LIST, STORE_CART, STORE_METADATA], 'readwrite');
-        tx.objectStore(STORE_LIST).put({ id: ctx, list: d.items });
-        tx.objectStore(STORE_CART).put({ id: ctx, items: d.cart });
-        tx.objectStore(STORE_METADATA).put({ id: ctx, data: d.metadata });
-    }
-
-    async function loadContextData(ctx) {
-        if(!contextData[ctx]) contextData[ctx] = { imageCount: new Map(), viewIndex: {}, cart: [], groups: [], combos: [], metadata: {}, items: [] };
-        
-        const getStore = (store) => db.transaction([store]).objectStore(store);
-
-        await new Promise(res => { getStore(STORE_LIST).get(ctx).onsuccess = e => { contextData[ctx].items = e.target.result?.list || []; res(); }; });
-        await new Promise(res => { getStore(STORE_CART).get(ctx).onsuccess = e => { contextData[ctx].cart = e.target.result?.items || []; res(); }; });
-        await new Promise(res => { getStore(STORE_METADATA).get(ctx).onsuccess = e => { contextData[ctx].metadata = e.target.result?.data || {}; res(); }; });
-        await new Promise(res => { getStore(STORE_GROUPS).index('mode').getAll(ctx).onsuccess = e => { contextData[ctx].groups = e.target.result || []; res(); }; });
-        await new Promise(res => { getStore(STORE_COMBOS).index('mode').getAll(ctx).onsuccess = e => { contextData[ctx].combos = e.target.result || []; res(); }; });
-        
-        if (!contextData[ctx].metadata._v39Migrated) {
-            const curItems = contextData[ctx].items;
-            const range = IDBKeyRange.bound(`${ctx}_`, `${ctx}_\uffff`);
-            await new Promise(res => {
-                getStore(STORE_IMG).openCursor(range).onsuccess = e => {
-                    const cursor = e.target.result;
-                    if(cursor) {
-                        if(curItems.includes(cursor.value.name)) {
-                            let imgData = cursor.value.imageData;
-                            let count = Array.isArray(imgData) ? imgData.length : 1;
-                            contextData[ctx].imageCount.set(cursor.value.name, count);
-                            
-                            if(!contextData[ctx].metadata[cursor.value.name]) contextData[ctx].metadata[cursor.value.name] = {tags:[]};
-                            contextData[ctx].metadata[cursor.value.name].imgCount = count;
-                        }
-                        cursor.continue();
-                    } else res();
-                };
+                Object.entries(MODELS[modelId].modes).forEach(([modeId, mode]) => {
+                    if (!mode.group) {
+                        needSave = true;
+                        if (modelId === 'vexilapse-illustrious' && ['artists', 'characters', 'lighting', 'niji'].includes(modeId)) mode.group = 'vexilapse';
+                        else if (modelId === 'illustrious' && ['artists', 'characters', 'lighting', 'niji'].includes(modeId)) mode.group = 'vexilapse';
+                        else if (modelId === 'anima' && ['artists'].includes(modeId)) mode.group = 'default';
+                        else mode.group = 'custom';
+                    }
+                });
             });
-            contextData[ctx].metadata._v39Migrated = true;
-            saveMetadata(ctx);
+            if(needSave) saveModels();
+            let savedModelId = localStorage.getItem('lastModelId'); let savedModeId = localStorage.getItem('lastModeId');
+            if (savedModelId && MODELS[savedModelId]) {
+                currentModelId = savedModelId;
+                if (savedModeId && MODELS[savedModelId].modes[savedModeId]) currentModeId = savedModeId;
+                else currentModeId = Object.keys(MODELS[savedModelId].modes)[0];
+            } else {
+                currentModelId = 'illustrious';
+                if (MODELS['illustrious'] && Object.keys(MODELS['illustrious'].modes).length > 0) currentModeId = Object.keys(MODELS['illustrious'].modes)[0];
+                else { currentModelId = Object.keys(MODELS)[0]; currentModeId = Object.keys(MODELS[currentModelId].modes)[0]; }
+            }
         } else {
-            contextData[ctx].items.forEach(item => {
-                contextData[ctx].imageCount.set(item, contextData[ctx].metadata[item]?.imgCount || 0);
-            });
+            MODELS = {
+                'illustrious': { id: 'illustrious', name: 'Illustrious', categories:[{id:'custom', name:'自定义'}], modes: { custom: {name:'自定义', icon:'✨', group:'custom'} } },
+                'vexilapse-illustrious': { 
+                    id: 'vexilapse-illustrious', name: 'Vexilapse-Illustrious', categories:[{id:'vexilapse', name:'基础分类'}],
+                    modes: { artists: {name:'画师', icon:'👨‍🎨', group:'vexilapse'}, characters: {name:'角色', icon:'🎭', group:'vexilapse'}, lighting: {name:'光效', icon:'💡', group:'vexilapse'}, niji: {name:'Niji', icon:'🎨', group:'vexilapse'} } 
+                },
+                'anima': { id: 'anima', name: 'Anima', categories:[{id:'default', name:'内置模式'}], modes: { artists: {name:'画师', icon:'👨‍🎨', group:'default'} } }
+            };
+            saveModels(); currentModelId = 'illustrious'; currentModeId = 'custom';
         }
     }
 
-    function saveItems(ctx) { ctx = ctx || getContext(); db.transaction([STORE_LIST], 'readwrite').objectStore(STORE_LIST).put({ id: ctx, list: contextData[ctx].items }); }
-    function saveCart(ctx) { ctx = ctx || getContext(); db.transaction([STORE_CART], 'readwrite').objectStore(STORE_CART).put({ id: ctx, items: contextData[ctx].cart }); }
-    function saveMetadata(ctx) { ctx = ctx || getContext(); db.transaction([STORE_METADATA], 'readwrite').objectStore(STORE_METADATA).put({ id: ctx, data: contextData[ctx].metadata }); }
-    
-    function saveGroups(ctx) {
-        ctx = ctx || getContext();
-        const tr = db.transaction([STORE_GROUPS], 'readwrite'); 
-        const st = tr.objectStore(STORE_GROUPS);
-        st.index('mode').openCursor(IDBKeyRange.only(ctx)).onsuccess = e => {
-            const c = e.target.result; 
-            if(c) { c.delete(); c.continue(); } 
-            else { contextData[ctx].groups.forEach(g => { let toSave = { ...g, mode: ctx }; delete toSave.id; st.put(toSave); }); }
-        };
-    }
-    
-    function saveCombos(ctx) {
-        ctx = ctx || getContext();
-        const tr = db.transaction([STORE_COMBOS], 'readwrite'); 
-        const st = tr.objectStore(STORE_COMBOS);
-        st.index('mode').openCursor(IDBKeyRange.only(ctx)).onsuccess = e => {
-            const c = e.target.result; 
-            if(c) { c.delete(); c.continue(); } 
-            else { contextData[ctx].combos.forEach(g => { let toSave = { ...g, mode: ctx }; delete toSave.id; st.put(toSave); }); }
-        };
+    function saveModels() { globalDB.models.main_models = MODELS; syncDB(); }
+
+    async function formatPlugin() {
+        if(!confirm('🧨 警告：格式化将永久删除您的所有模型、卡片、图片和配置，恢复到最初状态！此操作不可逆！\n\n确认要格式化吗？')) return;
+        if(!confirm('请最后一次确认，真的要格式化插件吗？(这清空您的所有本地缓存，以及 data 文件夹下的所有物理文件！)')) return;
+        
+        try { await fetch('/api/prompt-manager/format', { method: 'POST' }); } catch(e) { console.error("格式化物理文件失败", e); }
+        globalDB = { models: {}, settings: {}, contexts: {}, images: {} };
+        syncDB(); localStorage.clear(); 
+        alert('插件已格式化完毕，即将重启页面。'); location.reload(); 
     }
 
-    async function getFirstImage(item, ctx) {
-        if (!contextData[ctx].imageCount.get(item)) return null;
-        return new Promise(res => {
-            db.transaction([STORE_IMG]).objectStore(STORE_IMG).get(`${ctx}_${item}`).onsuccess = e => {
-                if(e.target.result && e.target.result.imageData && e.target.result.imageData.length > 0) {
-                    res(Array.isArray(e.target.result.imageData) ? e.target.result.imageData[0] : e.target.result.imageData);
-                } else res(null);
-            };
+    function saveContextCore(ctx) { syncDB(); }
+    
+    async function loadContextData(ctx) {
+        if (!globalDB.contexts[ctx]) globalDB.contexts[ctx] = { cart: [], groups: [], combos: [], metadata: {}, items: [] };
+        contextData[ctx] = globalDB.contexts[ctx];
+        contextData[ctx].imageCount = new Map();
+        contextData[ctx].viewIndex = contextData[ctx].viewIndex || {};
+        contextData[ctx].items.forEach(item => {
+            const imgKey = ctx + '_' + item;
+            const imgs = globalDB.images[imgKey] || [];
+            contextData[ctx].imageCount.set(item, imgs.length);
         });
     }
 
+    function saveItems(ctx) { syncDB(); }
+    function saveCart(ctx) { syncDB(); }
+    function saveMetadata(ctx) { syncDB(); }
+    function saveGroups(ctx) { syncDB(); }
+    function saveCombos(ctx) { syncDB(); }
+
+    async function getFirstImage(item, ctx) {
+        const imgs = globalDB.images[ctx + '_' + item] || [];
+        return imgs.length > 0 ? imgs[0] : null;
+    }
+
     async function prepareSearchContexts() {
-        const scope = document.getElementById('searchScope').value;
-        const targetCtxs = [];
-        if (scope === 'current_mode') {
-            targetCtxs.push(getContext());
-        } else if (scope === 'current_category') {
+        const scope = document.getElementById('searchScope').value; const targetCtxs = [];
+        if (scope === 'current_mode') targetCtxs.push(getContext());
+        else if (scope === 'current_category') {
             const catId = MODELS[currentModelId].modes[currentModeId].group;
             Object.keys(MODELS[currentModelId].modes).forEach(mId => {
-                if(MODELS[currentModelId].modes[mId].group === catId || (!MODELS[currentModelId].modes[mId].group && catId==='custom')) {
-                    targetCtxs.push(`${currentModelId}_${mId}`);
-                }
+                if(MODELS[currentModelId].modes[mId].group === catId || (!MODELS[currentModelId].modes[mId].group && catId==='custom')) targetCtxs.push(`${currentModelId}_${mId}`);
             });
         } else if (scope === 'current_model') {
-            Object.keys(MODELS[currentModelId].modes).forEach(mId => {
-                targetCtxs.push(`${currentModelId}_${mId}`);
-            });
+            Object.keys(MODELS[currentModelId].modes).forEach(mId => { targetCtxs.push(`${currentModelId}_${mId}`); });
         }
         for(let ctx of targetCtxs) { await loadContextData(ctx); }
         return targetCtxs;
     }
 
-    async function triggerSearch(reset = true) {
-        currentSearchCtxs = await prepareSearchContexts();
-        renderItems(reset);
-        updateTagCloud();
-    }
+    async function triggerSearch(reset = true) { currentSearchCtxs = await prepareSearchContexts(); renderItems(reset); updateTagCloud(); }
 
     function switchModel(modelId, force=false) {
-        if(!force && currentModelId === modelId) return;
-        currentModelId = modelId;
-        const keys = Object.keys(MODELS[modelId].modes);
-        if(!keys.includes(currentModeId)) currentModeId = keys[0];
-        
-        localStorage.setItem('lastModelId', currentModelId);
-        localStorage.setItem('lastModeId', currentModeId);
-        
-        document.getElementById('searchScope').value = 'current_mode';
-        document.getElementById('searchInput').value = '';
-        document.getElementById('remarkFilter').value = '';
-        document.getElementById('tagFilter').value = '';
-
-        renderModelTabs(); renderSidebarModes();
-        
-        document.getElementById('vexilapseNotice').style.display = (modelId === 'vexilapse-illustrious') ? 'flex' : 'none';
-        triggerSearch(true);
+        if(!force && currentModelId === modelId) return; currentModelId = modelId;
+        const keys = Object.keys(MODELS[modelId].modes); if(!keys.includes(currentModeId)) currentModeId = keys[0];
+        localStorage.setItem('lastModelId', currentModelId); localStorage.setItem('lastModeId', currentModeId);
+        document.getElementById('searchScope').value = 'current_mode'; document.getElementById('searchInput').value = ''; document.getElementById('remarkFilter').value = ''; document.getElementById('tagFilter').value = '';
+        renderModelTabs(); renderSidebarModes(); document.getElementById('vexilapseNotice').style.display = (modelId === 'vexilapse-illustrious') ? 'flex' : 'none'; triggerSearch(true);
     }
 
     function switchMode(modeId) {
-        if(currentModeId === modeId) return;
-        currentModeId = modeId;
-        
-        localStorage.setItem('lastModeId', currentModeId);
-        
-        document.getElementById('searchScope').value = 'current_mode';
-        document.getElementById('searchInput').value = '';
-        document.getElementById('remarkFilter').value = '';
-        document.getElementById('tagFilter').value = '';
-
-        renderSidebarModes();
-        triggerSearch(true);
+        if(currentModeId === modeId) return; currentModeId = modeId; localStorage.setItem('lastModeId', currentModeId);
+        document.getElementById('searchScope').value = 'current_mode'; document.getElementById('searchInput').value = ''; document.getElementById('remarkFilter').value = ''; document.getElementById('tagFilter').value = '';
+        renderSidebarModes(); triggerSearch(true);
     }
 
     function renderModelTabs() {
         const c = document.getElementById('modelTabs'); c.innerHTML = '';
         Object.values(MODELS).forEach(m => {
             const btn = document.createElement('button'); btn.className = `model-tab ${m.id===currentModelId?'active':''}`;
-            btn.innerHTML = `
-                <span style="pointer-events:none;">${escapeHtml(m.name)}</span>
-                <span class="model-tab-action" style="font-size:0.8rem; margin-left:6px; color:var(--text-light);" onclick="editModelTab(event, '${m.id}')" title="重命名">✏️</span>
-                <span class="model-tab-action" style="font-size:0.8rem; margin-left:0; color:var(--error);" onclick="delModel(event,'${m.id}')" title="删除">✖</span>
-            `;
-            btn.onclick = e => { if(!e.target.classList.contains('model-tab-action')) switchModel(m.id); };
-            c.appendChild(btn);
+            btn.innerHTML = `<span style="pointer-events:none;">${escapeHtml(m.name)}</span>
+                             <span class="model-tab-action" style="font-size:0.8rem; margin-left:6px; color:var(--text-light);" onclick="editModelTab(event, '${m.id}')" title="重命名">✏️</span>
+                             <span class="model-tab-action" style="font-size:0.8rem; margin-left:0; color:var(--error);" onclick="delModel(event,'${m.id}')" title="删除">✖</span>`;
+            btn.onclick = e => { if(!e.target.classList.contains('model-tab-action')) switchModel(m.id); }; c.appendChild(btn);
         });
-        const addBtn = document.createElement('button'); addBtn.className = 'model-tab add-model-btn'; addBtn.innerText='+'; addBtn.onclick = () => showModal('modelModal');
-        c.appendChild(addBtn);
+        const addBtn = document.createElement('button'); addBtn.className = 'model-tab add-model-btn'; addBtn.innerText='+'; addBtn.onclick = () => showModal('modelModal'); c.appendChild(addBtn);
     }
     
     function editModelTab(e, id) {
-        e.stopPropagation();
-        const newName = prompt('修改模型标签页名称:', MODELS[id].name);
-        if (newName && newName.trim()) {
-            MODELS[id].name = newName.trim();
-            saveModels();
-            renderModelTabs();
-            if (currentModelId === id) renderSidebarModes();
-        }
+        e.stopPropagation(); const newName = prompt('修改模型标签页名称:', MODELS[id].name);
+        if (newName && newName.trim()) { MODELS[id].name = newName.trim(); saveModels(); renderModelTabs(); if (currentModelId === id) renderSidebarModes(); }
     }
 
     function renderSidebarModes() {
         const c = document.getElementById('modeSwitcher'); c.innerHTML = '';
         document.getElementById('currentModelLabel').textContent = `📋 ${MODELS[currentModelId].name} 分类`;
-        
-        const cats = MODELS[currentModelId].categories || [];
-        const statesStr = localStorage.getItem('catAccordionStates');
-        let states = statesStr ? JSON.parse(statesStr) : {};
+        const cats = MODELS[currentModelId].categories || []; const statesStr = localStorage.getItem('catAccordionStates'); let states = statesStr ? JSON.parse(statesStr) : {};
 
         cats.forEach(cat => {
             const modesInCat = Object.entries(MODELS[currentModelId].modes).filter(([id, m]) => m.group === cat.id || (!m.group && cat.id==='custom'));
             if(modesInCat.length > 0) {
-                const catDiv = document.createElement('div');
-                const isOpen = states[`cat_acc_${cat.id}`] !== false; 
-                catDiv.className = `sub-accordion cat-accordion ${isOpen ? 'open' : ''}`;
-                catDiv.id = `cat_acc_${cat.id}`;
+                const catDiv = document.createElement('div'); const isOpen = states[`cat_acc_${cat.id}`] !== false; 
+                catDiv.className = `sub-accordion cat-accordion ${isOpen ? 'open' : ''}`; catDiv.id = `cat_acc_${cat.id}`;
                 catDiv.innerHTML = `
                     <div class="sub-accordion-header" onclick="toggleCatAccordion('cat_acc_${cat.id}')">
-                        <div class="clickable-title" style="font-size: 0.75rem; color: var(--text-light); font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">
-                            ${escapeHtml(cat.name)}
-                        </div>
+                        <div class="clickable-title" style="font-size: 0.75rem; color: var(--text-light); font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">${escapeHtml(cat.name)}</div>
                         <span class="sub-arrow">▼</span>
                     </div>
-                    <div class="sub-accordion-body"></div>
-                `;
-                
+                    <div class="sub-accordion-body"></div>`;
                 const body = catDiv.querySelector('.sub-accordion-body');
                 modesInCat.forEach(([id, m]) => {
                     const btn = document.createElement('div'); btn.className = 'mode-item';
@@ -1602,12 +1430,9 @@
     }
 
     function toggleCatAccordion(id) {
-        const el = document.getElementById(id);
-        el.classList.toggle('open');
-        const statesStr = localStorage.getItem('catAccordionStates');
-        let states = statesStr ? JSON.parse(statesStr) : {};
-        states[id] = el.classList.contains('open');
-        localStorage.setItem('catAccordionStates', JSON.stringify(states));
+        const el = document.getElementById(id); el.classList.toggle('open');
+        const statesStr = localStorage.getItem('catAccordionStates'); let states = statesStr ? JSON.parse(statesStr) : {};
+        states[id] = el.classList.contains('open'); localStorage.setItem('catAccordionStates', JSON.stringify(states));
     }
 
     let dragModeCatIdx = null;
@@ -1616,172 +1441,94 @@
         const cats = MODELS[currentModelId].categories || [];
         cats.forEach((cat, idx) => {
             const div = document.createElement('div'); div.className = 'list-item'; div.draggable = true;
-            div.innerHTML = `
-                <div style="flex:1;"><b>${escapeHtml(cat.name)}</b></div>
-                <div style="display:flex;gap:5px;">
-                    <button class="btn btn-outline" style="padding:4px 8px" onclick="editModeCategory(${idx})">✏️</button>
-                    <button class="btn btn-danger" style="padding:4px 8px" onclick="deleteModeCategory(${idx})">🗑️</button>
-                </div>
-            `;
-            div.ondragstart = e => { dragModeCatIdx = idx; div.style.opacity='0.5'; };
-            div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
+            div.innerHTML = `<div style="flex:1;"><b>${escapeHtml(cat.name)}</b></div>
+                             <div style="display:flex;gap:5px;">
+                                <button class="btn btn-outline" style="padding:4px 8px" onclick="editModeCategory(${idx})">✏️</button>
+                                <button class="btn btn-danger" style="padding:4px 8px" onclick="deleteModeCategory(${idx})">🗑️</button>
+                             </div>`;
+            div.ondragstart = e => { dragModeCatIdx = idx; div.style.opacity='0.5'; }; div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
             div.ondragleave = e => div.classList.remove('drag-over');
             div.ondrop = e => { 
                 e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; 
-                if(dragModeCatIdx!==null && dragModeCatIdx!==idx) { 
-                    const it = cats.splice(dragModeCatIdx,1)[0]; 
-                    cats.splice(idx,0,it); 
-                    saveModels(); 
-                    openCategoryManager(); 
-                    renderSidebarModes();
-                } 
+                if(dragModeCatIdx!==null && dragModeCatIdx!==idx) { const it = cats.splice(dragModeCatIdx,1)[0]; cats.splice(idx,0,it); saveModels(); openCategoryManager(); renderSidebarModes(); } 
             };
-            div.ondragend = () => div.style.opacity='1';
-            list.appendChild(div);
+            div.ondragend = () => div.style.opacity='1'; list.appendChild(div);
         });
         showModal('categoryManagerModal');
     }
 
+// 【修改点】创建分类时
     function addModeCategory() {
-        const name = document.getElementById('newCategoryInput').value.trim();
+        const name = document.getElementById('newCategoryInput').value.trim(); 
         if(!name) return showToast('请输入分类名称');
         if(!MODELS[currentModelId].categories) MODELS[currentModelId].categories = [];
-        MODELS[currentModelId].categories.push({ id: 'cat_'+Date.now(), name: name });
-        document.getElementById('newCategoryInput').value = '';
-        saveModels(); openCategoryManager(); renderSidebarModes();
-    }
+    
+        const safeName = name.replace(/[\/\\:*?"<>|]/g, '');
+        MODELS[currentModelId].categories.push({ id: 'cat_' + safeName + '_' + Math.floor(Math.random()*1000), name: name });
+        document.getElementById('newCategoryInput').value = ''; saveModels(); openCategoryManager(); renderSidebarModes();
+}
 
-    function editModeCategory(idx) {
-        const cat = MODELS[currentModelId].categories[idx];
-        const newName = prompt('修改分类名称:', cat.name);
-        if(newName && newName.trim()) {
-            cat.name = newName.trim();
-            saveModels(); openCategoryManager(); renderSidebarModes();
-        }
-    }
+    function editModeCategory(idx) { const cat = MODELS[currentModelId].categories[idx]; const newName = prompt('修改分类名称:', cat.name); if(newName && newName.trim()) { cat.name = newName.trim(); saveModels(); openCategoryManager(); renderSidebarModes(); } }
 
     function deleteModeCategory(idx) {
-        const cats = MODELS[currentModelId].categories;
-        if(cats.length <= 1) return showToast('至少保留一个分类');
-        if(!confirm('确认删除该分类？\n注意：该分类下的模式会自动移入首个分类中。')) return;
-
-        const catToDelete = cats[idx].id;
-        cats.splice(idx, 1);
-        const fallbackCatId = cats[0].id;
-
-        Object.values(MODELS[currentModelId].modes).forEach(m => {
-            if(m.group === catToDelete) m.group = fallbackCatId;
-        });
-
+        const cats = MODELS[currentModelId].categories; if(cats.length <= 1) return showToast('至少保留一个分类');
+        if(!confirm('确认删除该分类？该分类下的模式会自动移入首个分类中。')) return;
+        const catToDelete = cats[idx].id; cats.splice(idx, 1); const fallbackCatId = cats[0].id;
+        Object.values(MODELS[currentModelId].modes).forEach(m => { if(m.group === catToDelete) m.group = fallbackCatId; });
         saveModels(); openCategoryManager(); renderSidebarModes();
     }
 
     function sortCategories(type) {
-        if(!MODELS[currentModelId].categories) return;
-        const cats = MODELS[currentModelId].categories;
-        if(type === 'asc') {
-            cats.sort((a,b) => a.name.localeCompare(b.name, 'zh-CN'));
-        } else if(type === 'desc') {
-            cats.sort((a,b) => b.name.localeCompare(a.name, 'zh-CN'));
-        } else if(type === 'default') {
-            cats.sort((a,b) => a.id.localeCompare(b.id));
-        }
-        saveModels();
-        openCategoryManager();
-        renderSidebarModes();
-        showToast('分类已重新排序');
+        if(!MODELS[currentModelId].categories) return; const cats = MODELS[currentModelId].categories;
+        if(type === 'asc') cats.sort((a,b) => a.name.localeCompare(b.name, 'zh-CN')); else if(type === 'desc') cats.sort((a,b) => b.name.localeCompare(a.name, 'zh-CN')); else if(type === 'default') cats.sort((a,b) => a.id.localeCompare(b.id));
+        saveModels(); openCategoryManager(); renderSidebarModes(); showToast('分类已重新排序');
     }
 
     let dragModeIdx = null;
     function openModeManager() {
         const list = document.getElementById('modeListContainer'); list.innerHTML = '';
-        const modesObj = MODELS[currentModelId].modes;
-        const modeKeys = Object.keys(modesObj);
-        
+        const modesObj = MODELS[currentModelId].modes; const modeKeys = Object.keys(modesObj);
         modeKeys.forEach((key, idx) => {
-            const m = modesObj[key];
-            const cat = (MODELS[currentModelId].categories || []).find(c => c.id === m.group);
-            const catName = cat ? cat.name : '未分类';
-            
+            const m = modesObj[key]; const cat = (MODELS[currentModelId].categories || []).find(c => c.id === m.group); const catName = cat ? cat.name : '未分类';
             const div = document.createElement('div'); div.className = 'list-item'; div.draggable = true;
-            div.innerHTML = `
-                <div style="flex:1;"><b>${m.icon} ${escapeHtml(m.name)}</b> <span style="font-size:0.8rem;color:var(--text-light); margin-left: 8px;">[${escapeHtml(catName)}]</span></div>
-                <div style="display:flex;gap:5px;">
-                    <button class="btn btn-outline" style="padding:4px 8px" onclick="openEditMode('${key}')">✏️ 编辑</button>
-                </div>
-            `;
-            
-            div.ondragstart = e => { dragModeIdx = idx; div.style.opacity='0.5'; };
-            div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
+            div.innerHTML = `<div style="flex:1;"><b>${m.icon} ${escapeHtml(m.name)}</b> <span style="font-size:0.8rem;color:var(--text-light); margin-left: 8px;">[${escapeHtml(catName)}]</span></div>
+                             <div style="display:flex;gap:5px;"><button class="btn btn-outline" style="padding:4px 8px" onclick="openEditMode('${key}')">✏️ 编辑</button></div>`;
+            div.ondragstart = e => { dragModeIdx = idx; div.style.opacity='0.5'; }; div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
             div.ondragleave = e => div.classList.remove('drag-over');
             div.ondrop = e => { 
                 e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; 
                 if(dragModeIdx!==null && dragModeIdx!==idx) { 
-                    const keys = Object.keys(MODELS[currentModelId].modes);
-                    const draggedKey = keys.splice(dragModeIdx, 1)[0];
-                    keys.splice(idx, 0, draggedKey);
-                    
-                    const newModes = {};
-                    keys.forEach(k => newModes[k] = MODELS[currentModelId].modes[k]);
-                    MODELS[currentModelId].modes = newModes;
-                    
-                    saveModels(); 
-                    openModeManager(); 
-                    renderSidebarModes();
+                    const keys = Object.keys(MODELS[currentModelId].modes); const draggedKey = keys.splice(dragModeIdx, 1)[0]; keys.splice(idx, 0, draggedKey);
+                    const newModes = {}; keys.forEach(k => newModes[k] = MODELS[currentModelId].modes[k]); MODELS[currentModelId].modes = newModes; saveModels(); openModeManager(); renderSidebarModes();
                 } 
             };
-            div.ondragend = () => div.style.opacity='1';
-            list.appendChild(div);
+            div.ondragend = () => div.style.opacity='1'; list.appendChild(div);
         });
         showModal('modeManagerModal');
     }
 
     function sortModes(type) {
-        const modes = MODELS[currentModelId].modes;
-        let keys = Object.keys(modes);
-        if(type === 'asc') {
-            keys.sort((a,b) => modes[a].name.localeCompare(modes[b].name, 'zh-CN'));
-        } else if(type === 'desc') {
-            keys.sort((a,b) => modes[b].name.localeCompare(modes[a].name, 'zh-CN'));
-        } else if(type === 'default') {
-            keys.sort((a,b) => a.localeCompare(b));
-        }
-        const newModes = {};
-        keys.forEach(k => newModes[k] = modes[k]);
-        MODELS[currentModelId].modes = newModes;
-        saveModels();
-        openModeManager();
-        renderSidebarModes();
-        showToast('模式已重新排序');
+        const modes = MODELS[currentModelId].modes; let keys = Object.keys(modes);
+        if(type === 'asc') keys.sort((a,b) => modes[a].name.localeCompare(modes[b].name, 'zh-CN')); else if(type === 'desc') keys.sort((a,b) => modes[b].name.localeCompare(modes[a].name, 'zh-CN')); else if(type === 'default') keys.sort((a,b) => a.localeCompare(b));
+        const newModes = {}; keys.forEach(k => newModes[k] = modes[k]); MODELS[currentModelId].modes = newModes; saveModels(); openModeManager(); renderSidebarModes(); showToast('模式已重新排序');
     }
     
     function renderSidebarWorkspaces() {
         const d = contextData[getContext()];
-        
-        const gl = document.getElementById('sidebarGroupsList');
-        gl.innerHTML = '';
+        const gl = document.getElementById('sidebarGroupsList'); gl.innerHTML = '';
         if(d.groups.length === 0) gl.innerHTML = '<div style="color:var(--text-light);font-size:0.8rem;padding:4px 10px;">暂无分组</div>';
         d.groups.forEach((g, idx) => {
-            const item = document.createElement('div');
-            item.className = 'sidebar-sub-item';
+            const item = document.createElement('div'); item.className = 'sidebar-sub-item';
             item.innerHTML = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(g.name)}">${escapeHtml(g.name)}</span>`;
-            item.onclick = () => viewGroup(idx, getContext());
-            gl.appendChild(item);
+            item.onclick = () => viewGroup(idx, getContext()); gl.appendChild(item);
         });
-
-        const cl = document.getElementById('sidebarCombosList');
-        cl.innerHTML = '';
+        const cl = document.getElementById('sidebarCombosList'); cl.innerHTML = '';
         if(d.combos.length === 0) cl.innerHTML = '<div style="color:var(--text-light);font-size:0.8rem;padding:4px 10px;">暂无组合</div>';
         d.combos.forEach((c, idx) => {
-            const item = document.createElement('div');
-            item.className = 'sidebar-sub-item';
-            item.innerHTML = `
-                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
-                <span style="font-size:0.8rem; color:var(--text-light);" title="复制Prompt">📋</span>
-            `;
-            item.onclick = () => {
-                copyTxt(c.elements.map(e=>e.weight!=1?`(${e.tag}:${e.weight})`:e.tag).join(', '));
-            };
+            const item = document.createElement('div'); item.className = 'sidebar-sub-item';
+            item.innerHTML = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+                              <span style="font-size:0.8rem; color:var(--text-light);" title="复制Prompt">📋</span>`;
+            item.onclick = () => { copyTxt(c.elements.map(e=>e.weight!=1?`(${e.tag}:${e.weight})`:e.tag).join(', ')); };
             cl.appendChild(item);
         });
     }
@@ -1793,14 +1540,11 @@
         document.getElementById('badgeGroup').innerText = countG; document.getElementById('groupsCount').innerText = countG;
         document.getElementById('badgeCombo').innerText = countCB; document.getElementById('combinationsCount').innerText = countCB;
         
-        let ttl = 0;
-        let withImg = 0; 
+        let ttl = 0; let withImg = 0; 
         currentSearchCtxs.forEach(ctx => {
             if(!contextData[ctx]) return;
             ttl += contextData[ctx].items.length;
-            contextData[ctx].items.forEach(i => {
-                if(contextData[ctx].imageCount.get(i) > 0) withImg++; 
-            });
+            contextData[ctx].items.forEach(i => { if(contextData[ctx].imageCount.get(i) > 0) withImg++; });
         });
         
         document.getElementById('statsTotal').innerText = ttl;
@@ -1808,50 +1552,30 @@
         if (scope === 'current_mode') document.getElementById('statsTotalLabel').innerText = `总${MODELS[currentModelId].modes[currentModeId].name}`;
         else if (scope === 'current_category') document.getElementById('statsTotalLabel').innerText = `大类统计`;
         else document.getElementById('statsTotalLabel').innerText = `全库统计`;
-        
         document.getElementById('statsWithImg').innerText = withImg;
         document.getElementById('statsWithoutImg').innerText = ttl - withImg;
-
         renderSidebarWorkspaces();
     }
 
     function updateTagCloud() {
-        const cloud = document.getElementById('tagCloud');
-        if(!cloud) return;
-        cloud.innerHTML = '';
-        
+        const cloud = document.getElementById('tagCloud'); if(!cloud) return; cloud.innerHTML = '';
         const tagSet = new Set();
         currentSearchCtxs.forEach(ctx => {
             if(!contextData[ctx] || !contextData[ctx].metadata) return;
-            Object.values(contextData[ctx].metadata).forEach(meta => {
-                if(meta.tags) meta.tags.forEach(t => tagSet.add(t));
-            });
+            Object.values(contextData[ctx].metadata).forEach(meta => { if(meta.tags) meta.tags.forEach(t => tagSet.add(t)); });
         });
-        
         const uniqueTags = Array.from(tagSet).sort();
-        
-        if(uniqueTags.length === 0) {
-            cloud.style.display = 'none';
-            return;
-        }
+        if(uniqueTags.length === 0) { cloud.style.display = 'none'; return; }
         cloud.style.display = 'flex';
-        
         const currentFilter = document.getElementById('tagFilter').value.toLowerCase();
         
         uniqueTags.forEach(tag => {
             const btn = document.createElement('div');
-            btn.className = `tag-cloud-item ${currentFilter === tag.toLowerCase() ? 'active' : ''}`;
-            btn.innerText = tag;
+            btn.className = `tag-cloud-item ${currentFilter === tag.toLowerCase() ? 'active' : ''}`; btn.innerText = tag;
             btn.onclick = () => {
                 const filterInput = document.getElementById('tagFilter');
-                if (filterInput.value === tag) {
-                    filterInput.value = ''; 
-                    btn.classList.remove('active');
-                } else {
-                    filterInput.value = tag;
-                    document.querySelectorAll('.tag-cloud-item').forEach(el => el.classList.remove('active'));
-                    btn.classList.add('active');
-                }
+                if (filterInput.value === tag) { filterInput.value = ''; btn.classList.remove('active'); } 
+                else { filterInput.value = tag; document.querySelectorAll('.tag-cloud-item').forEach(el => el.classList.remove('active')); btn.classList.add('active'); }
                 triggerSearch(true);
             };
             cloud.appendChild(btn);
@@ -1859,32 +1583,21 @@
     }
 
     let searchTimeout;
-    function performSearch() {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => { renderItems(true); }, 300);
-    }
+    function performSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(() => { renderItems(true); }, 300); }
 
     function getSortedFilteredItems() {
-        const kw = document.getElementById('searchInput').value.toLowerCase().trim();
-        const kws = kw ? kw.split(/\s+/) : [];
-        const remarkKw = document.getElementById('remarkFilter').value.toLowerCase().trim();
-        const remarkKws = remarkKw ? remarkKw.split(/\s+/) : [];
-        const tag = document.getElementById('tagFilter').value.toLowerCase();
-        const st = document.getElementById('imageStatusFilter').value;
+        const kw = document.getElementById('searchInput').value.toLowerCase().trim(); const kws = kw ? kw.split(/\s+/) : [];
+        const remarkKw = document.getElementById('remarkFilter').value.toLowerCase().trim(); const remarkKws = remarkKw ? remarkKw.split(/\s+/) : [];
+        const tag = document.getElementById('tagFilter').value.toLowerCase(); const st = document.getElementById('imageStatusFilter').value;
         const sort = document.getElementById('sortSelect').value;
-
         let res = [];
         
         currentSearchCtxs.forEach(ctx => {
             if(!contextData[ctx]) return;
             const d = contextData[ctx];
             const filtered = d.items.filter(i => {
-                const iLower = i.toLowerCase();
-                if(kws.length > 0 && !kws.every(k => iLower.includes(k))) return false;
-                
-                const rLower = (d.metadata[i]?.remark || '').toLowerCase();
-                if(remarkKws.length > 0 && !remarkKws.every(k => rLower.includes(k))) return false;
-                
+                const iLower = i.toLowerCase(); if(kws.length > 0 && !kws.every(k => iLower.includes(k))) return false;
+                const rLower = (d.metadata[i]?.remark || '').toLowerCase(); if(remarkKws.length > 0 && !remarkKws.every(k => rLower.includes(k))) return false;
                 const tags = d.metadata[i]?.tags || [];
                 if(tag && !tag.split(',').some(t => tags.some(tt => tt.toLowerCase().includes(t.trim())))) return false;
                 const hasImg = d.imageCount.get(i) > 0;
@@ -1896,8 +1609,7 @@
         });
 
         res.sort((a,b) => {
-            const hA = contextData[a.ctx].imageCount.get(a.item) > 0;
-            const hB = contextData[b.ctx].imageCount.get(b.item) > 0;
+            const hA = contextData[a.ctx].imageCount.get(a.item) > 0; const hB = contextData[b.ctx].imageCount.get(b.item) > 0;
             if(sort === 'name-asc') return a.item.localeCompare(b.item,'zh-CN');
             if(sort === 'name-desc') return b.item.localeCompare(a.item,'zh-CN');
             if(sort === 'has-image') return hA === hB ? a.item.localeCompare(b.item,'zh-CN') : (hA ? -1 : 1);
@@ -1910,85 +1622,51 @@
 
     async function handleBatchUpload(files, itemName, ctx) {
         if (!files.length) return;
-        showProgress('正在上传图片...', `共 ${files.length} 张`);
+        showProgress('正在上传图片到本地硬盘...', `共 ${files.length} 张`);
         
         const d = contextData[ctx];
-        let images = [];
-        const record = await new Promise(resolve => {
-            db.transaction([STORE_IMG]).objectStore(STORE_IMG).get(`${ctx}_${itemName}`).onsuccess = ev => resolve(ev.target.result);
-        });
-        if (record && record.imageData) {
-            images = Array.isArray(record.imageData) ? record.imageData : [record.imageData];
-        }
+        const imgKey = ctx + '_' + itemName;
+        if(!globalDB.images[imgKey]) globalDB.images[imgKey] = [];
         
         for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            if(!file.type.match('image.*')) continue;
+            const file = files[i]; if(!file.type.match('image.*')) continue;
             updateProgress(((i)/files.length)*100, `处理中 ${i+1}/${files.length}`);
             
             const dataUrl = await new Promise(res=>{ const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(file); });
             const compressed = await compress(dataUrl).catch(()=>dataUrl);
-            images.push(compressed);
+            
+            const safeName = sanitizePrompt(itemName).replace(/[^a-zA-Z0-9]/g, '');
+            const res = await fetch('/api/prompt-manager/upload', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ image: compressed, filename: `upload_${safeName}_${Date.now()}_${i}.png`, subfolder: ctx })
+            });
+            const json = await res.json();
+            if(json.success) globalDB.images[imgKey].push(json.url); 
         }
         
-        d.imageCount.set(itemName, images.length);
+        d.imageCount.set(itemName, globalDB.images[imgKey].length);
         if(!d.metadata[itemName]) d.metadata[itemName] = {tags:[]};
-        d.metadata[itemName].imgCount = images.length; 
-        saveMetadata(ctx);
+        d.metadata[itemName].imgCount = globalDB.images[imgKey].length; 
+        syncDB();
 
-        db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).put({id: `${ctx}_${itemName}`, mode: ctx, name: itemName, imageData: images});
-        
         if (d.viewIndex[itemName] === undefined) d.viewIndex[itemName] = 0;
-        
-        for (let [i, card] of activeCards.entries()) {
-            if(card.dataset.rawItem === itemName && card.dataset.ctx === ctx) {
-                card.cachedImages = images; 
-                renderCardImages(card, itemName, ctx);
-            }
-        }
-        updateBadges(); 
-        hideProgress();
-        showToast(`成功上传 ${files.length} 张图片`);
+        for (let [i, card] of activeCards.entries()) { if(card.dataset.rawItem === itemName && card.dataset.ctx === ctx) renderCardImages(card, itemName, ctx); }
+        updateBadges(); hideProgress(); showToast(`成功上传 ${files.length} 张图片`);
     }
 
-    async function renderCardImages(card, item, ctx) {
+    function renderCardImages(card, item, ctx) {
         const d = contextData[ctx];
-        
         let pc = card.querySelector('.preview-wrapper');
-        if(!pc) {
-            pc = document.createElement('div');
-            pc.className = 'preview-wrapper';
-            card.insertBefore(pc, card.querySelector('.item-tags'));
-        }
+        if(!pc) { pc = document.createElement('div'); pc.className = 'preview-wrapper'; card.insertBefore(pc, card.querySelector('.item-tags')); }
 
+        const imgKey = ctx + '_' + item;
         const count = d.imageCount.get(item) || 0;
-        
-        if (count > 0 && card.dataset.imgLoaded !== 'true') {
-            pc.innerHTML = `<div class="preview-container"><div class="preview-loading">↻</div></div>`;
-            
-            let images = [];
-            const record = await new Promise(res => {
-                db.transaction([STORE_IMG]).objectStore(STORE_IMG).get(`${ctx}_${item}`).onsuccess = e => res(e.target.result);
-            });
-            if (record && record.imageData) {
-                images = Array.isArray(record.imageData) ? record.imageData : [record.imageData];
-            }
-            
-            if (card.dataset.rawItem !== item || card.dataset.ctx !== ctx) return;
-            
-            card.dataset.imgLoaded = 'true';
-            card.cachedImages = images; 
-        }
-        
-        let images = card.cachedImages || [];
+        let images = globalDB.images[imgKey] || [];
 
-        if(!d.viewIndex) d.viewIndex = {};
-        let idx = d.viewIndex[item] || 0;
-        if(idx > images.length) idx = images.length;
-        d.viewIndex[item] = idx;
+        if(!d.viewIndex) d.viewIndex = {}; let idx = d.viewIndex[item] || 0;
+        if(idx > images.length) idx = images.length; d.viewIndex[item] = idx;
 
-        const hasCurrentImg = idx < images.length;
-        const currentImgSrc = hasCurrentImg ? images[idx] : null;
+        const hasCurrentImg = idx < images.length; const currentImgSrc = hasCurrentImg ? images[idx] : null;
 
         pc.innerHTML = `
             <div class="preview-container">
@@ -2003,99 +1681,61 @@
                 ${images.map((src, i) => `<img src="${src}" class="thumb-box ${i === idx ? 'active' : ''}" data-idx="${i}">`).join('')}
                 <div class="thumb-box ${idx === images.length ? 'active' : ''}" data-idx="${images.length}" title="添加新图">+</div>
             </div>
-            ` : ''}
-        `;
+            ` : ''}`;
 
-        const prevContainer = pc.querySelector('.preview-container');
-        const leftBtn = pc.querySelector('.left-arrow');
-        const rightBtn = pc.querySelector('.right-arrow');
-        const delBtn = pc.querySelector('.del-img-btn');
-        const mainImg = pc.querySelector('.preview-image');
+        const prevContainer = pc.querySelector('.preview-container'), leftBtn = pc.querySelector('.left-arrow'), rightBtn = pc.querySelector('.right-arrow'), delBtn = pc.querySelector('.del-img-btn'), mainImg = pc.querySelector('.preview-image');
 
         if(leftBtn) leftBtn.onclick = (e) => { e.stopPropagation(); d.viewIndex[item]--; renderCardImages(card, item, ctx); };
         if(rightBtn) rightBtn.onclick = (e) => { e.stopPropagation(); d.viewIndex[item]++; renderCardImages(card, item, ctx); };
 
         const triggerBatchUpload = () => {
-            const inp = document.createElement('input'); 
-            inp.type = 'file'; 
-            inp.accept = 'image/*'; 
-            inp.multiple = true;
-            inp.onchange = ev => { 
-                if(ev.target.files.length > 0) handleBatchUpload(ev.target.files, item, ctx); 
-            };
-            inp.click();
+            const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+            inp.onchange = ev => { if(ev.target.files.length > 0) handleBatchUpload(ev.target.files, item, ctx); }; inp.click();
         };
 
         if(hasCurrentImg) {
             mainImg.onclick = (e) => { e.stopPropagation(); fsImg(currentImgSrc); };
             delBtn.onclick = (e) => { e.stopPropagation(); delImg(item, idx, ctx); };
         } else {
-            prevContainer.onclick = triggerBatchUpload;
-            prevContainer.ondragover = e => e.preventDefault();
+            prevContainer.onclick = triggerBatchUpload; prevContainer.ondragover = e => e.preventDefault();
             prevContainer.ondrop = e => { e.preventDefault(); if(e.dataTransfer.files.length > 0) handleBatchUpload(e.dataTransfer.files, item, ctx); };
         }
 
         pc.querySelectorAll('.thumb-box').forEach(tb => {
             tb.onclick = (e) => { 
-                e.stopPropagation(); 
-                let targetIdx = parseInt(tb.dataset.idx);
-                if(targetIdx === images.length) {
-                    triggerBatchUpload();
-                } else {
-                    d.viewIndex[item] = targetIdx; 
-                    renderCardImages(card, item, ctx); 
-                }
+                e.stopPropagation(); let targetIdx = parseInt(tb.dataset.idx);
+                if(targetIdx === images.length) triggerBatchUpload(); else { d.viewIndex[item] = targetIdx; renderCardImages(card, item, ctx); }
             };
         });
 
-        const tagsContainer = card.querySelector('.item-tags');
-        let sysTag = tagsContainer.querySelector('.tag.system');
-        if(images.length > 0) {
-            if(!sysTag) tagsContainer.insertAdjacentHTML('afterbegin', `<span class="tag system">有图</span>`);
-        } else {
-            if(sysTag) sysTag.remove();
-        }
+        const tagsContainer = card.querySelector('.item-tags'); let sysTag = tagsContainer.querySelector('.tag.system');
+        if(images.length > 0) { if(!sysTag) tagsContainer.insertAdjacentHTML('afterbegin', `<span class="tag system">有图</span>`); } else { if(sysTag) sysTag.remove(); }
     }
 
     function updateGridLayout() {
         const container = document.getElementById('itemsContainer');
         const containerWidth = container.clientWidth || (window.innerWidth - (document.body.classList.contains('sidebar-collapsed') ? 0 : 280) - 60);
         if (containerWidth < 100) return;
-
-        const scale = document.getElementById('cardScaleSlider').value;
-        const baseWidth = 280 * (scale / 100); 
-
+        const scale = document.getElementById('cardScaleSlider').value; const baseWidth = 280 * (scale / 100); 
         virtualGrid.cols = Math.max(1, Math.floor((containerWidth + virtualGrid.gap) / (baseWidth + virtualGrid.gap)));
         virtualGrid.cardWidth = (containerWidth - (virtualGrid.cols - 1) * virtualGrid.gap) / virtualGrid.cols;
         virtualGrid.cardHeight = virtualGrid.cardWidth + 210;
-
         const totalRows = Math.ceil(currentFilteredItems.length / virtualGrid.cols);
         container.style.height = `${(totalRows * virtualGrid.cardHeight) + Math.max(0, totalRows - 1) * virtualGrid.gap}px`;
     }
 
     function renderItems(reset = true) {
         const container = document.getElementById('itemsContainer');
-        
         if (reset) {
-            currentFilteredItems = getSortedFilteredItems();
-            renderToken++; 
-            updateGridLayout();
-            activeCards.forEach(card => card.remove());
-            activeCards.clear();
-            container.innerHTML = ''; 
-            updateBadges();
+            currentFilteredItems = getSortedFilteredItems(); renderToken++; 
+            updateGridLayout(); activeCards.forEach(card => card.remove()); activeCards.clear();
+            container.innerHTML = ''; updateBadges();
         }
 
-        if(currentFilteredItems.length === 0) { 
-            if(reset) container.innerHTML = `<div style="text-align:center;padding:50px;color:var(--text-light);width:100%;">找不到匹配项...</div>`; 
-            return; 
-        }
+        if(currentFilteredItems.length === 0) { if(reset) container.innerHTML = `<div style="text-align:center;padding:50px;color:var(--text-light);width:100%;">找不到匹配项...</div>`; return; }
 
-        const containerTop = container.getBoundingClientRect().top + window.scrollY; 
-        const scrollTop = window.scrollY;
-        
-        const visibleTop = Math.max(0, scrollTop - containerTop);
-        const visibleBottom = visibleTop + window.innerHeight;
+        const containerTop = container.getBoundingClientRect().top + window.scrollY, scrollTop = window.scrollY;
+        const visibleTop = Math.max(0, scrollTop - containerTop), visibleBottom = visibleTop + window.innerHeight;
 
         const startRow = Math.max(0, Math.floor(visibleTop / (virtualGrid.cardHeight + virtualGrid.gap)) - virtualGrid.bufferRows);
         const endRow = Math.min(
@@ -2103,94 +1743,56 @@
             Math.ceil(visibleBottom / (virtualGrid.cardHeight + virtualGrid.gap)) + virtualGrid.bufferRows
         );
 
-        const startIndex = startRow * virtualGrid.cols;
-        const endIndex = Math.min(currentFilteredItems.length - 1, ((endRow + 1) * virtualGrid.cols) - 1);
+        const startIndex = startRow * virtualGrid.cols, endIndex = Math.min(currentFilteredItems.length - 1, ((endRow + 1) * virtualGrid.cols) - 1);
+        const indicesToRender = new Set(); for (let i = startIndex; i <= endIndex; i++) indicesToRender.add(i);
 
-        const indicesToRender = new Set();
-        for (let i = startIndex; i <= endIndex; i++) indicesToRender.add(i);
-
-        for (let [idx, card] of activeCards.entries()) {
-            if (!indicesToRender.has(idx)) {
-                card.cachedImages = null; 
-                card.remove();
-                activeCards.delete(idx);
-            }
-        }
+        for (let [idx, card] of activeCards.entries()) { if (!indicesToRender.has(idx)) { card.remove(); activeCards.delete(idx); } }
 
         const token = renderToken;
         for (let i = startIndex; i <= endIndex; i++) {
             if (token !== renderToken) break;
-
-            const row = Math.floor(i / virtualGrid.cols);
-            const col = i % virtualGrid.cols;
-            const top = row * (virtualGrid.cardHeight + virtualGrid.gap);
-            const left = col * (virtualGrid.cardWidth + virtualGrid.gap);
-
+            const row = Math.floor(i / virtualGrid.cols); const col = i % virtualGrid.cols;
+            const top = row * (virtualGrid.cardHeight + virtualGrid.gap); const left = col * (virtualGrid.cardWidth + virtualGrid.gap);
             let card;
-            if (!activeCards.has(i)) {
-                card = createCardElement(currentFilteredItems[i], i);
-                container.appendChild(card);
-                activeCards.set(i, card);
-            } else {
-                card = activeCards.get(i);
-            }
-
-            card.style.top = `${top}px`;
-            card.style.left = `${left}px`;
-            card.style.width = `${virtualGrid.cardWidth}px`;
-            card.style.height = `${virtualGrid.cardHeight}px`;
+            if (!activeCards.has(i)) { card = createCardElement(currentFilteredItems[i], i); container.appendChild(card); activeCards.set(i, card); } 
+            else { card = activeCards.get(i); }
+            card.style.top = `${top}px`; card.style.left = `${left}px`;
+            card.style.width = `${virtualGrid.cardWidth}px`; card.style.height = `${virtualGrid.cardHeight}px`;
         }
     }
 
     function createCardElement(obj, index) {
-        const { item, ctx } = obj;
-        const d = contextData[ctx];
-        
-        const inCart = d.cart.includes(item);
-        const inGrp = d.groups.some(g => g.items.includes(item));
-        const tags = d.metadata[item]?.tags || [];
-        const remark = d.metadata[item]?.remark || '';
-        
-        const batchKey = `${ctx}||${item}`;
-        const isBatchSelected = batchSelection.has(batchKey);
+        const { item, ctx } = obj; const d = contextData[ctx];
+        const inCart = d.cart.includes(item); const inGrp = d.groups.some(g => g.items.includes(item));
+        const tags = d.metadata[item]?.tags || []; const remark = d.metadata[item]?.remark || '';
+        const batchKey = `${ctx}||${item}`; const isBatchSelected = batchSelection.has(batchKey);
         const safeItem = escapeHtml(item);
 
         let sourceTagHtml = '';
         if(document.getElementById('searchScope').value !== 'current_mode') {
-            const m = ctx.split('_')[1];
-            const mName = MODELS[currentModelId].modes[m]?.name || m;
+            const m = ctx.split('_')[1]; const mName = MODELS[currentModelId].modes[m]?.name || m;
             sourceTagHtml = `<span class="tag" style="background:var(--secondary); color:white; opacity:0.9; padding:2px 6px;">[${mName}]</span>`;
         }
 
         const card = document.createElement('div');
         card.className = `item-card ${batchMode && isBatchSelected ? 'selected' : ''}`;
-        card.dataset.rawItem = item;
-        card.dataset.ctx = ctx;
-        card.dataset.imgLoaded = 'false';
+        card.dataset.rawItem = item; card.dataset.ctx = ctx;
         
         card.onclick = (e) => { 
-            if(batchMode && !isDraggingMarquee && !e.target.closest('.item-actions, .item-footer-actions, .preview-wrapper, .preview-container, .thumb-box')) {
-                toggleBatchSelection(item, ctx);
-            }
+            if(batchMode && !isDraggingMarquee && !e.target.closest('.item-actions, .item-footer-actions, .preview-wrapper, .preview-container, .thumb-box')) toggleBatchSelection(item, ctx);
         };
         
         card.innerHTML = `
             <div class="item-header">
-                <div class="item-name" title="${safeItem}">
-                    <span class="item-index">${index + 1}</span>
-                    <span class="item-name-text">${sourceTagHtml}${safeItem} <span style="font-size:0.8rem; color:var(--text-light); font-weight:normal;">${remark ? '('+escapeHtml(remark)+')' : ''}</span></span>
-                </div>
+                <div class="item-name" title="${safeItem}"><span class="item-index">${index + 1}</span><span class="item-name-text">${sourceTagHtml}${safeItem} <span style="font-size:0.8rem; color:var(--text-light); font-weight:normal;">${remark ? '('+escapeHtml(remark)+')' : ''}</span></span></div>
             </div>
-            <div class="item-tags">
-                ${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
-            </div>
+            <div class="item-tags">${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>
             <div class="item-footer-actions">
                 <button class="icon-btn btn-cart ${inCart?'active':''}" title="购物车">🛒</button>
                 <button class="icon-btn btn-group ${inGrp?'active':''}" title="加入分组">${inGrp?'⭐':'☆'}</button>
                 <button class="icon-btn btn-edit" title="编辑卡片">✏️</button>
                 <button class="icon-btn btn-delete" style="color:var(--error);" title="删除此卡片">🗑️</button>
-            </div>
-        `;
+            </div>`;
         
         renderCardImages(card, item, ctx);
 
@@ -2203,36 +1805,24 @@
         return card;
     }
 
-    let isDraggingMarquee = false;
-    let isMarqueeActive = false;
-    let marqueeStartX, marqueeStartY;
-    let lastClientX = 0, lastClientY = 0;
+    let isDraggingMarquee = false, isMarqueeActive = false;
+    let marqueeStartX, marqueeStartY, lastClientX = 0, lastClientY = 0;
     let marqueeSelectionSnapshot = new Set();
-    const marqueeEl = document.createElement('div');
-    marqueeEl.className = 'selection-marquee';
-    document.body.appendChild(marqueeEl);
+    const marqueeEl = document.createElement('div'); marqueeEl.className = 'selection-marquee'; document.body.appendChild(marqueeEl);
 
     function toggleBatchMode() {
-        batchMode = !batchMode;
-        batchSelection.clear();
+        batchMode = !batchMode; batchSelection.clear();
         document.getElementById('itemsContainer').classList.toggle('batch-mode', batchMode);
         document.getElementById('batchActionBar').style.display = batchMode ? 'flex' : 'none';
-        updateBatchDeleteBtn();
-        renderItems(true);
-        showToast(batchMode ? '已开启批量选择：点击单选，或长按拖拽进行框选' : '已退出批量模式');
+        updateBatchDeleteBtn(); renderItems(true); showToast(batchMode ? '已开启批量选择：点击单选，或长按拖拽进行框选' : '已退出批量模式');
     }
 
     function toggleBatchSelection(item, ctx) {
-        const batchKey = `${ctx}||${item}`;
-        const isActive = !batchSelection.has(batchKey);
-
-        if(!isActive) batchSelection.delete(batchKey);
-        else batchSelection.add(batchKey);
-        
+        const batchKey = `${ctx}||${item}`; const isActive = !batchSelection.has(batchKey);
+        if(!isActive) batchSelection.delete(batchKey); else batchSelection.add(batchKey);
         for (let [i, cardDom] of activeCards.entries()) {
             if(cardDom.dataset.rawItem === item && cardDom.dataset.ctx === ctx) {
-                if(isActive) cardDom.classList.add('selected');
-                else cardDom.classList.remove('selected');
+                if(isActive) cardDom.classList.add('selected'); else cardDom.classList.remove('selected');
             }
         }
         updateBatchDeleteBtn();
@@ -2240,357 +1830,212 @@
 
     function selectAllBatch() {
         const isAllSelected = currentFilteredItems.length > 0 && batchSelection.size === currentFilteredItems.length;
-        if (isAllSelected) {
-            batchSelection.clear();
-        } else {
-            currentFilteredItems.forEach(obj => {
-                batchSelection.add(`${obj.ctx}||${obj.item}`);
-            });
-        }
-        
+        if (isAllSelected) batchSelection.clear();
+        else { currentFilteredItems.forEach(obj => { batchSelection.add(`${obj.ctx}||${obj.item}`); }); }
         for (let [i, cardDom] of activeCards.entries()) {
-            const item = cardDom.dataset.rawItem;
-            const ctx = cardDom.dataset.ctx;
-            if(batchSelection.has(`${ctx}||${item}`)) {
-                cardDom.classList.add('selected');
-            } else {
-                cardDom.classList.remove('selected');
-            }
+            const item = cardDom.dataset.rawItem, ctx = cardDom.dataset.ctx;
+            if(batchSelection.has(`${ctx}||${item}`)) cardDom.classList.add('selected'); else cardDom.classList.remove('selected');
         }
         updateBatchDeleteBtn();
     }
 
     function updateBatchDeleteBtn() { 
         document.getElementById('batchSelectText').innerText = `已选择 ${batchSelection.size} 项`; 
-        
         const btn = document.getElementById('selectAllBtn');
-        if (btn) {
-            const isAllSelected = currentFilteredItems.length > 0 && batchSelection.size === currentFilteredItems.length;
-            btn.innerHTML = isAllSelected ? '取消全选' : '☑️ 全选';
-        }
+        if (btn) btn.innerHTML = (currentFilteredItems.length > 0 && batchSelection.size === currentFilteredItems.length) ? '取消全选' : '☑️ 全选';
     }
 
     document.addEventListener('mousedown', e => {
-        if(!batchMode) return;
-        if(e.target.closest('#batchActionBar') || e.target.closest('.modal')) return;
-        
-        isDraggingMarquee = false;
-        isMarqueeActive = true;
-        marqueeStartX = e.pageX;
-        marqueeStartY = e.pageY;
-        lastClientX = e.clientX;
-        lastClientY = e.clientY;
-        
-        marqueeEl.style.left = marqueeStartX + 'px';
-        marqueeEl.style.top = marqueeStartY + 'px';
-        marqueeEl.style.width = '0px';
-        marqueeEl.style.height = '0px';
-        marqueeEl.style.display = 'block';
-        
+        if(!batchMode) return; if(e.target.closest('#batchActionBar') || e.target.closest('.modal')) return;
+        isDraggingMarquee = false; isMarqueeActive = true;
+        marqueeStartX = e.pageX; marqueeStartY = e.pageY; lastClientX = e.clientX; lastClientY = e.clientY;
+        marqueeEl.style.left = marqueeStartX + 'px'; marqueeEl.style.top = marqueeStartY + 'px'; marqueeEl.style.width = '0px'; marqueeEl.style.height = '0px'; marqueeEl.style.display = 'block';
         marqueeSelectionSnapshot = new Set(batchSelection);
     });
 
-    document.addEventListener('mousemove', e => {
-        if(!batchMode || !isMarqueeActive) return;
-        lastClientX = e.clientX;
-        lastClientY = e.clientY;
-        updateMarquee(e.pageX, e.pageY);
-    });
+    document.addEventListener('mousemove', e => { if(!batchMode || !isMarqueeActive) return; lastClientX = e.clientX; lastClientY = e.clientY; updateMarquee(e.pageX, e.pageY); });
 
     function updateMarquee(currentX, currentY) {
-        if(Math.abs(currentX - marqueeStartX) > 5 || Math.abs(currentY - marqueeStartY) > 5) {
-            isDraggingMarquee = true;
-        }
+        if(Math.abs(currentX - marqueeStartX) > 5 || Math.abs(currentY - marqueeStartY) > 5) isDraggingMarquee = true;
         if(!isDraggingMarquee) return;
-
-        const left = Math.min(marqueeStartX, currentX);
-        const top = Math.min(marqueeStartY, currentY);
-        const width = Math.abs(currentX - marqueeStartX);
-        const height = Math.abs(currentY - marqueeStartY);
-
-        marqueeEl.style.left = left + 'px';
-        marqueeEl.style.top = top + 'px';
-        marqueeEl.style.width = width + 'px';
-        marqueeEl.style.height = height + 'px';
+        const left = Math.min(marqueeStartX, currentX), top = Math.min(marqueeStartY, currentY), width = Math.abs(currentX - marqueeStartX), height = Math.abs(currentY - marqueeStartY);
+        marqueeEl.style.left = left + 'px'; marqueeEl.style.top = top + 'px'; marqueeEl.style.width = width + 'px'; marqueeEl.style.height = height + 'px';
 
         const rect = { left, top, right: left + width, bottom: top + height };
-        const container = document.getElementById('itemsContainer');
-        const containerRect = container.getBoundingClientRect();
+        const containerRect = document.getElementById('itemsContainer').getBoundingClientRect();
         
         currentFilteredItems.forEach((obj, i) => {
-            const row = Math.floor(i / virtualGrid.cols);
-            const col = i % virtualGrid.cols;
+            const cardLeft = containerRect.left + window.scrollX + ((i % virtualGrid.cols) * (virtualGrid.cardWidth + virtualGrid.gap));
+            const cardTop = containerRect.top + window.scrollY + (Math.floor(i / virtualGrid.cols) * (virtualGrid.cardHeight + virtualGrid.gap));
+            const isIntersecting = !(rect.right < cardLeft || rect.left > cardLeft + virtualGrid.cardWidth || rect.bottom < cardTop || rect.top > cardTop + virtualGrid.cardHeight);
 
-            const cardLeft = containerRect.left + window.scrollX + (col * (virtualGrid.cardWidth + virtualGrid.gap));
-            const cardTop = containerRect.top + window.scrollY + (row * (virtualGrid.cardHeight + virtualGrid.gap));
-            const cardRight = cardLeft + virtualGrid.cardWidth;
-            const cardBottom = cardTop + virtualGrid.cardHeight;
+            const batchKey = `${obj.ctx}||${obj.item}`; const inSnapshot = marqueeSelectionSnapshot.has(batchKey);
+            let shouldBeSelected = isIntersecting ? !inSnapshot : inSnapshot;
 
-            const isIntersecting = !(rect.right < cardLeft || rect.left > cardRight || rect.bottom < cardTop || rect.top > cardBottom);
-
-            const item = obj.item;
-            const ctx = obj.ctx;
-            const batchKey = `${ctx}||${item}`;
-            const inSnapshot = marqueeSelectionSnapshot.has(batchKey);
-
-            let shouldBeSelected = false;
-            if (isIntersecting) {
-                shouldBeSelected = !inSnapshot;
-            } else {
-                shouldBeSelected = inSnapshot;
-            }
-
-            if (shouldBeSelected && !batchSelection.has(batchKey)) {
-                batchSelection.add(batchKey);
-            } else if (!shouldBeSelected && batchSelection.has(batchKey)) {
-                batchSelection.delete(batchKey);
-            }
+            if (shouldBeSelected && !batchSelection.has(batchKey)) batchSelection.add(batchKey);
+            else if (!shouldBeSelected && batchSelection.has(batchKey)) batchSelection.delete(batchKey);
 
             if (activeCards.has(i)) {
-                const cardDom = activeCards.get(i);
-                if (shouldBeSelected) cardDom.classList.add('selected');
-                else cardDom.classList.remove('selected');
+                if (shouldBeSelected) activeCards.get(i).classList.add('selected'); else activeCards.get(i).classList.remove('selected');
             }
         });
         updateBatchDeleteBtn();
     }
 
     document.addEventListener('mouseup', () => {
-        if(isMarqueeActive) {
-            isMarqueeActive = false;
-            marqueeEl.style.display = 'none';
-            setTimeout(() => { isDraggingMarquee = false; }, 50);
-        }
+        if(isMarqueeActive) { isMarqueeActive = false; marqueeEl.style.display = 'none'; setTimeout(() => { isDraggingMarquee = false; }, 50); }
     });
 
     function executeBatchDelete() {
         if(batchSelection.size === 0) return showToast('未选择任何项');
         if(!confirm(`确认彻底删除这 ${batchSelection.size} 项吗？(包含图片及全部属性)`)) return;
 
-        const dirtyCtxs = new Set();
-        
         batchSelection.forEach(batchKey => {
-            const [ctx, item] = batchKey.split('||');
-            const d = contextData[ctx];
-            if(!d) return;
-            d.items = d.items.filter(x => x !== item);
-            d.cart = d.cart.filter(x => x !== item);
-            delete d.metadata[item];
+            const [ctx, item] = batchKey.split('||'); const d = contextData[ctx]; if(!d) return;
+            d.items = d.items.filter(x => x !== item); d.cart = d.cart.filter(x => x !== item); delete d.metadata[item];
             d.groups.forEach(g => g.items = g.items.filter(x => x !== item));
             d.combos.forEach(c => c.elements = c.elements.filter(e => e.tag !== item));
             
-            if(d.imageCount.has(item)) {
-                d.imageCount.delete(item);
-                db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).delete(`${ctx}_${item}`);
+            const imgKey = ctx + '_' + item;
+            if(globalDB.images[imgKey]) {
+                globalDB.images[imgKey].forEach(url => deletePhysicalFile(url));
+                delete globalDB.images[imgKey];
             }
-            dirtyCtxs.add(ctx);
+            d.imageCount.delete(item);
         });
 
-        dirtyCtxs.forEach(ctx => {
-            saveContextCore(ctx); 
-            saveGroups(ctx); 
-            saveCombos(ctx);
-        });
-        
-        toggleBatchMode(); showToast('批量删除成功');
+        syncDB(); toggleBatchMode(); showToast('批量删除成功');
     }
     
-    async function delImg(itemName, index, ctx) {
+    function delImg(itemName, index, ctx) {
         const d = contextData[ctx];
+        // 修复：必须加上 ctx 才能精确找到 globalDB 里的对应图片数组
+        const imgKey = ctx + '_' + itemName;
+        let images = globalDB.images[imgKey] || [];
         
-        let images = [];
-        const record = await new Promise(resolve => {
-            db.transaction([STORE_IMG]).objectStore(STORE_IMG).get(`${ctx}_${itemName}`).onsuccess = ev => resolve(ev.target.result);
-        });
-        if (record && record.imageData) images = Array.isArray(record.imageData) ? record.imageData : [record.imageData];
-
-        images.splice(index, 1);
+        let removedImg = images.splice(index, 1)[0];
+        deletePhysicalFile(removedImg); // 调用物理删除接口
         
         if(images.length === 0) {
+            delete globalDB.images[imgKey];
             d.imageCount.set(itemName, 0);
             if(d.metadata[itemName]) d.metadata[itemName].imgCount = 0;
-            saveMetadata(ctx);
-            db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).delete(`${ctx}_${itemName}`);
             d.viewIndex[itemName] = 0;
         } else {
             d.imageCount.set(itemName, images.length);
             if(d.metadata[itemName]) d.metadata[itemName].imgCount = images.length;
-            saveMetadata(ctx);
-            db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).put({id: `${ctx}_${itemName}`, mode: ctx, name: itemName, imageData: images});
             if(d.viewIndex[itemName] >= images.length) d.viewIndex[itemName] = images.length - 1;
         }
-        
+        syncDB();
         for (let [i, card] of activeCards.entries()) {
-            if(card.dataset.rawItem === itemName && card.dataset.ctx === ctx) {
-                card.cachedImages = images;
-                renderCardImages(card, itemName, ctx);
-            }
+            if(card.dataset.rawItem === itemName && card.dataset.ctx === ctx) renderCardImages(card, itemName, ctx);
         }
-        updateBadges(); 
-        showToast('图片已删除');
+        updateBadges(); showToast('追加的图片已成功删除，物理文件已清理');
     }
     
     function compress(dataURL) {
         return new Promise((res, rej) => {
             const img = new Image();
             img.onload = () => {
-                const cvs = document.createElement('canvas');
-                let w = img.width, h = img.height;
+                const cvs = document.createElement('canvas'); let w = img.width, h = img.height;
                 if(w > compressSettings.maxWidth) { h = h * (compressSettings.maxWidth/w); w = compressSettings.maxWidth; }
-                cvs.width = w; cvs.height = h;
-                cvs.getContext('2d').drawImage(img, 0, 0, w, h);
+                cvs.width = w; cvs.height = h; cvs.getContext('2d').drawImage(img, 0, 0, w, h);
                 res(cvs.toDataURL('image/jpeg', compressSettings.quality));
             };
             img.onerror = rej; img.src = dataURL;
         });
     }
 
-    let currentBgBase64 = null;
-    let isDraggingBox = false;
-    let dragOffset = {x:0, y:0};
+    let currentBgBase64 = null, isDraggingBox = false, dragOffset = {x:0, y:0};
     
     function openUISettingsModal() {
         showModal('uiSettingsModal');
         document.getElementById('themeColorPicker').value = uiConfig.themeColor || '#ff6b9d';
         document.getElementById('cornerStyleSelect').value = uiConfig.cornerStyle || 'rounded';
-        
         document.getElementById('cardOpacity').value = uiConfig.cardOpacity !== undefined ? uiConfig.cardOpacity : 95;
         document.getElementById('cardOpacityVal').innerText = (uiConfig.cardOpacity !== undefined ? uiConfig.cardOpacity : 95) + '%';
-        
         document.getElementById('bgOpacity').value = uiConfig.bgOpacity;
         document.getElementById('bgOpacityVal').innerText = uiConfig.bgOpacity + '%';
         document.getElementById('bgBlur').value = uiConfig.bgBlur;
         document.getElementById('bgBlurVal').innerText = uiConfig.bgBlur + 'px';
-        
         document.getElementById('badgeToggle').checked = uiConfig.showBadges !== false;
     }
 
-    function toggleThemeCore() {
-        uiConfig.isNight = !uiConfig.isNight;
-        applyThemeToDOM();
-        saveSettings();
-    }
+    function toggleThemeCore() { uiConfig.isNight = !uiConfig.isNight; applyThemeToDOM(); saveSettings(); }
 
     function previewOpacitySettings() {
-        const cOpVal = document.getElementById('cardOpacity').value;
-        document.getElementById('cardOpacityVal').innerText = cOpVal + '%';
-        
-        const cOp = cOpVal / 100;
-        const gOp = Math.max(0, cOp - 0.1);
-        const isNight = uiConfig.isNight;
+        const cOpVal = document.getElementById('cardOpacity').value; document.getElementById('cardOpacityVal').innerText = cOpVal + '%';
+        const cOp = cOpVal / 100; const gOp = Math.max(0, cOp - 0.1); const isNight = uiConfig.isNight;
         document.documentElement.style.setProperty('--card-bg', isNight ? `rgba(40, 30, 35, ${cOp})` : `rgba(255, 255, 255, ${cOp})`);
         document.documentElement.style.setProperty('--glass-bg', isNight ? `rgba(26, 16, 20, ${gOp})` : `rgba(255, 255, 255, ${gOp})`);
     }
 
     function previewBgSettings() {
-        const opVal = document.getElementById('bgOpacity').value;
-        const bl = document.getElementById('bgBlur').value;
-        document.getElementById('bgOpacityVal').innerText = opVal + '%';
-        document.getElementById('bgBlurVal').innerText = bl + 'px';
+        document.getElementById('bgOpacityVal').innerText = document.getElementById('bgOpacity').value + '%';
+        document.getElementById('bgBlurVal').innerText = document.getElementById('bgBlur').value + 'px';
     }
 
     document.getElementById('bgFileInput').onchange = function(e) {
-        if(!e.target.files[0]) return;
-        const reader = new FileReader();
+        if(!e.target.files[0]) return; const reader = new FileReader();
         reader.onload = ev => {
-            currentBgBase64 = ev.target.result;
-            const img = document.getElementById('cropImg');
-            img.src = currentBgBase64;
-            document.getElementById('cropWrapper').style.display = 'flex';
-            document.getElementById('cropControls').style.display = 'block';
-            
+            currentBgBase64 = ev.target.result; const img = document.getElementById('cropImg'); img.src = currentBgBase64;
+            document.getElementById('cropWrapper').style.display = 'flex'; document.getElementById('cropControls').style.display = 'block';
             img.onload = () => { setCropRatio(16/9); }
         };
         reader.readAsDataURL(e.target.files[0]);
     };
 
     function setCropRatio(ratio) {
-        const wrap = document.getElementById('cropWrapper');
-        const box = document.getElementById('cropBox');
-        const img = document.getElementById('cropImg');
-        
-        let w = img.clientWidth;
-        let h = w / ratio;
+        const wrap = document.getElementById('cropWrapper'), box = document.getElementById('cropBox'), img = document.getElementById('cropImg');
+        let w = img.clientWidth, h = w / ratio;
         if(h > img.clientHeight) { h = img.clientHeight; w = h * ratio; }
-        
-        box.style.width = w + 'px';
-        box.style.height = h + 'px';
-        box.style.left = (wrap.clientWidth - w) / 2 + 'px';
-        box.style.top = (wrap.clientHeight - h) / 2 + 'px';
-        
-        box.onmousedown = e => {
-            isDraggingBox = true;
-            dragOffset.x = e.clientX - box.offsetLeft;
-            dragOffset.y = e.clientY - box.offsetTop;
-        };
+        box.style.width = w + 'px'; box.style.height = h + 'px'; box.style.left = (wrap.clientWidth - w) / 2 + 'px'; box.style.top = (wrap.clientHeight - h) / 2 + 'px';
+        box.onmousedown = e => { isDraggingBox = true; dragOffset.x = e.clientX - box.offsetLeft; dragOffset.y = e.clientY - box.offsetTop; };
         window.onmousemove = e => {
-            if(!isDraggingBox) return;
-            let nx = e.clientX - dragOffset.x;
-            let ny = e.clientY - dragOffset.y;
-            
-            const imgRect = img.getBoundingClientRect();
-            const wrapRect = wrap.getBoundingClientRect();
-            const minX = imgRect.left - wrapRect.left;
-            const minY = imgRect.top - wrapRect.top;
-            const maxX = minX + img.clientWidth - box.offsetWidth;
-            const maxY = minY + img.clientHeight - box.offsetHeight;
-            
-            if(nx < minX) nx = minX; if(nx > maxX) nx = maxX;
-            if(ny < minY) ny = minY; if(ny > maxY) ny = maxY;
-            
+            if(!isDraggingBox) return; let nx = e.clientX - dragOffset.x, ny = e.clientY - dragOffset.y;
+            const imgRect = img.getBoundingClientRect(), wrapRect = wrap.getBoundingClientRect();
+            const minX = imgRect.left - wrapRect.left, minY = imgRect.top - wrapRect.top;
+            const maxX = minX + img.clientWidth - box.offsetWidth, maxY = minY + img.clientHeight - box.offsetHeight;
+            if(nx < minX) nx = minX; if(nx > maxX) nx = maxX; if(ny < minY) ny = minY; if(ny > maxY) ny = maxY;
             box.style.left = nx + 'px'; box.style.top = ny + 'px';
         };
         window.onmouseup = () => { isDraggingBox = false; };
     }
 
     function saveUISettings() {
-        uiConfig.themeColor = document.getElementById('themeColorPicker').value;
-        uiConfig.cornerStyle = document.getElementById('cornerStyleSelect').value;
-        uiConfig.bgOpacity = document.getElementById('bgOpacity').value;
-        uiConfig.bgBlur = document.getElementById('bgBlur').value;
-        uiConfig.cardOpacity = document.getElementById('cardOpacity').value;
-        uiConfig.showBadges = document.getElementById('badgeToggle').checked;
+        uiConfig.themeColor = document.getElementById('themeColorPicker').value; uiConfig.cornerStyle = document.getElementById('cornerStyleSelect').value;
+        uiConfig.bgOpacity = document.getElementById('bgOpacity').value; uiConfig.bgBlur = document.getElementById('bgBlur').value;
+        uiConfig.cardOpacity = document.getElementById('cardOpacity').value; uiConfig.showBadges = document.getElementById('badgeToggle').checked;
 
         if(currentBgBase64) {
-            const box = document.getElementById('cropBox');
-            const img = document.getElementById('cropImg');
-            const scale = img.naturalWidth / img.clientWidth;
-            
+            const box = document.getElementById('cropBox'), img = document.getElementById('cropImg'), scale = img.naturalWidth / img.clientWidth;
             const wrap = document.getElementById('cropWrapper');
-            const imgLeft = img.getBoundingClientRect().left - wrap.getBoundingClientRect().left;
-            const imgTop = img.getBoundingClientRect().top - wrap.getBoundingClientRect().top;
-
-            const sx = (box.offsetLeft - imgLeft) * scale;
-            const sy = (box.offsetTop - imgTop) * scale;
-            const sw = box.offsetWidth * scale;
-            const sh = box.offsetHeight * scale;
-
-            const cvs = document.createElement('canvas');
-            cvs.width = sw; cvs.height = sh;
+            const imgLeft = img.getBoundingClientRect().left - wrap.getBoundingClientRect().left, imgTop = img.getBoundingClientRect().top - wrap.getBoundingClientRect().top;
+            const sx = (box.offsetLeft - imgLeft) * scale, sy = (box.offsetTop - imgTop) * scale, sw = box.offsetWidth * scale, sh = box.offsetHeight * scale;
+            const cvs = document.createElement('canvas'); cvs.width = sw; cvs.height = sh;
             const imgElem = new Image();
             imgElem.onload = () => {
                 cvs.getContext('2d').drawImage(imgElem, sx, sy, sw, sh, 0, 0, sw, sh);
                 uiConfig.bgImage = cvs.toDataURL('image/jpeg', 0.8);
-                saveSettings(); applyThemeToDOM();
-                hideModal('uiSettingsModal'); showToast('设置与背景已应用！');
+                saveSettings(); applyThemeToDOM(); hideModal('uiSettingsModal'); showToast('设置与背景已应用！');
             };
             imgElem.src = currentBgBase64;
-        } else {
-            saveSettings(); applyThemeToDOM(); hideModal('uiSettingsModal'); showToast('设置已应用');
-        }
+        } else { saveSettings(); applyThemeToDOM(); hideModal('uiSettingsModal'); showToast('设置已应用'); }
     }
 
     function clearBackground() {
         uiConfig.bgImage = ''; saveSettings(); applyThemeToDOM();
-        document.getElementById('cropWrapper').style.display = 'none';
-        document.getElementById('cropControls').style.display = 'none';
-        currentBgBase64 = null; document.getElementById('bgFileInput').value = '';
-        showToast('自定义背景已清除，恢复主题色背景');
+        document.getElementById('cropWrapper').style.display = 'none'; document.getElementById('cropControls').style.display = 'none';
+        currentBgBase64 = null; document.getElementById('bgFileInput').value = ''; showToast('自定义背景已清除');
     }
 
+// 【修改点】创建模型时的 ID 使用中文拼凑，去除乱码，后端 os.makedirs 原生支持中文
     function createModel() {
-        const name = sanitizePrompt(document.getElementById('newModelName').value.trim()); if(!name) return showToast("请输入有效名称");
-        const id = 'model_' + Date.now();
+        const name = sanitizePrompt(document.getElementById('newModelName').value.trim()); 
+        if(!name) return showToast("请输入有效名称");
+        const safeName = name.replace(/[\/\\:*?"<>|]/g, '');
+        const id = safeName + '_' + Math.floor(Math.random()*10000); 
+
         MODELS[id] = { id, name, categories: [{id:'custom', name:'自定义'}], modes: { custom: {name:'自定义', icon:'✨', group:'custom'} } };
         saveModels(); hideModal('modelModal'); switchModel(id); showToast('创建成功');
     }
@@ -2599,162 +2044,114 @@
         e.stopPropagation();
         if(Object.keys(MODELS).length <= 1) return showToast('警告：至少需要保留一个模型标签页！');
         if(!confirm(`确认彻底删除 [${MODELS[id].name}] 及其下的所有模式和数据吗？（包含图片将无法恢复）`)) return;
-        
         showProgress('清理数据中...', '这可能需要几秒钟，请稍候');
-        for (let modeId of Object.keys(MODELS[id].modes)) {
-            await clearContextData(`${id}_${modeId}`);
-        }
-        
-        delete MODELS[id]; saveModels();
-        hideProgress();
+        for (let modeId of Object.keys(MODELS[id].modes)) await clearContextData(`${id}_${modeId}`);
+        delete MODELS[id]; saveModels(); hideProgress();
         if(currentModelId === id) switchModel(Object.keys(MODELS)[0]); else renderModelTabs();
         showToast('已删除模型标签及相关所有数据');
     }
 
     let editModeIdTarget = null;
     function addNewMode() { 
-        document.getElementById('modeNameInput').value=''; 
-        document.getElementById('modeIconInput').value=''; 
-        
-        const sel = document.getElementById('modeCategorySelect');
-        sel.innerHTML = '';
-        const cats = MODELS[currentModelId].categories || [];
-        cats.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.innerText = c.name; sel.appendChild(opt); });
-        
-        document.getElementById('modeModalTitle').innerText='添加模式'; 
-        document.getElementById('deleteModeBtn').style.display='none'; 
-        editModeIdTarget=null; 
-        showModal('editModeModal'); 
+        document.getElementById('modeNameInput').value=''; document.getElementById('modeIconInput').value=''; 
+        const sel = document.getElementById('modeCategorySelect'); sel.innerHTML = '';
+        const cats = MODELS[currentModelId].categories || []; cats.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.innerText = c.name; sel.appendChild(opt); });
+        document.getElementById('modeModalTitle').innerText='添加模式'; document.getElementById('deleteModeBtn').style.display='none'; 
+        editModeIdTarget=null; showModal('editModeModal'); 
     }
     function openEditMode(id) {
         const m = MODELS[currentModelId].modes[id];
-        document.getElementById('modeNameInput').value = m.name; 
-        document.getElementById('modeIconInput').value = m.icon;
-        
-        const sel = document.getElementById('modeCategorySelect');
-        sel.innerHTML = '';
-        const cats = MODELS[currentModelId].categories || [];
-        cats.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.innerText = c.name; sel.appendChild(opt); });
+        document.getElementById('modeNameInput').value = m.name; document.getElementById('modeIconInput').value = m.icon;
+        const sel = document.getElementById('modeCategorySelect'); sel.innerHTML = '';
+        const cats = MODELS[currentModelId].categories || []; cats.forEach(c => { const opt = document.createElement('option'); opt.value = c.id; opt.innerText = c.name; sel.appendChild(opt); });
         sel.value = m.group || (cats.length > 0 ? cats[0].id : '');
-
-        document.getElementById('modeModalTitle').innerText = '编辑模式'; 
-        document.getElementById('deleteModeBtn').style.display='block';
-        editModeIdTarget = id; 
-        showModal('editModeModal');
+        document.getElementById('modeModalTitle').innerText = '编辑模式'; document.getElementById('deleteModeBtn').style.display='block';
+        editModeIdTarget = id; showModal('editModeModal');
     }
-    
+// 【修改点】创建模式时
     function saveMode() {
         const n = document.getElementById('modeNameInput').value.trim(), ic = document.getElementById('modeIconInput').value.trim()||'✨';
-        const grp = document.getElementById('modeCategorySelect').value;
-        if(!n) return showToast('名称不能为空');
-        
+        const grp = document.getElementById('modeCategorySelect').value; if(!n) return showToast('名称不能为空');
         if(editModeIdTarget) { 
             MODELS[currentModelId].modes[editModeIdTarget].name = n; 
             MODELS[currentModelId].modes[editModeIdTarget].icon = ic; 
             MODELS[currentModelId].modes[editModeIdTarget].group = grp; 
-        }
-        else { 
-            const nid = 'm_'+Date.now(); 
+        } else { 
+            const safeName = n.replace(/[\/\\:*?"<>|]/g, '');
+            const nid = safeName + '_' + Math.floor(Math.random()*10000); 
             MODELS[currentModelId].modes[nid] = {name:n, icon:ic, group:grp}; 
             editModeIdTarget = nid; 
         }
-        saveModels(); 
-        hideModal('editModeModal'); 
-        switchMode(editModeIdTarget); 
-        if (activeModals.includes('modeManagerModal')) openModeManager();
-        showToast('保存成功');
+        saveModels(); hideModal('editModeModal'); switchMode(editModeIdTarget); 
+        if (activeModals.includes('modeManagerModal')) openModeManager(); showToast('保存成功');
     }
-
     async function deleteMode() {
         if(Object.keys(MODELS[currentModelId].modes).length <= 1) return showToast('至少保留一个模式');
         if(!confirm('确认彻底删除此模式？其下的所有卡片和图片都将被永久清除且无法恢复！')) return;
-        
         showProgress('清理数据中...', '这可能需要几秒钟，请稍候');
         await clearContextData(`${currentModelId}_${editModeIdTarget}`);
-        
-        delete MODELS[currentModelId].modes[editModeIdTarget]; saveModels();
-        hideProgress();
-        hideModal('editModeModal'); 
-        switchModel(currentModelId, true); 
-        if (activeModals.includes('modeManagerModal')) openModeManager();
-        showToast('已删除模式及相关所有数据');
+        delete MODELS[currentModelId].modes[editModeIdTarget]; saveModels(); hideProgress(); hideModal('editModeModal'); 
+        switchModel(currentModelId, true); if (activeModals.includes('modeManagerModal')) openModeManager(); showToast('已删除模式及相关所有数据');
     }
 
-    function copyTxt(txt) { navigator.clipboard.writeText(txt); showToast('已复制: ' + txt); }
+    function copyTxt(txt) { 
+        const isNodeMode = window.location.search.includes('mode=node') || (window.self !== window.top);
+        if (isNodeMode) {
+            window.parent.postMessage({ type: "SEND_PROMPT_TO_NODE", prompt: txt }, "*");
+            showToast('已发送至工作流！');
+        } else {
+            navigator.clipboard.writeText(txt); 
+            showToast('已复制: ' + txt); 
+        }
+    }
     
     function toggleCart(item, ctx) {
-        const d = contextData[ctx];
-        const c = d.cart; 
-        const idx = c.indexOf(item);
-        const isActive = (idx === -1);
-        
-        if(idx > -1) {
-            c.splice(idx, 1);
-        } else {
-            c.push(item);
-            if(!d.metadata[item]) d.metadata[item] = { tags: [] };
-            d.metadata[item].cartWeight = 1.0;
-        }
-        
-        saveContextCore(ctx); 
-        
+        const d = contextData[ctx], c = d.cart, idx = c.indexOf(item), isActive = (idx === -1);
+        if(idx > -1) c.splice(idx, 1);
+        else { c.push(item); if(!d.metadata[item]) d.metadata[item] = { tags: [] }; d.metadata[item].cartWeight = 1.0; }
+        syncDB(); 
         for (let [i, card] of activeCards.entries()) {
             if(card.dataset.rawItem === item && card.dataset.ctx === ctx) {
                 const btn = card.querySelector('.btn-cart');
-                if(btn) {
-                    if(isActive) btn.classList.add('active');
-                    else btn.classList.remove('active');
-                }
+                if(btn) { if(isActive) btn.classList.add('active'); else btn.classList.remove('active'); }
             }
         }
         updateBadges(); 
-        if(ctx !== getContext()) {
-            const m = ctx.split('_')[1];
-            showToast(`已将 ${item} 加入 [${MODELS[currentModelId].modes[m]?.name || m}] 的购物车`);
-        }
+        if(ctx !== getContext()) { const m = ctx.split('_')[1]; showToast(`已将 ${item} 加入 [${MODELS[currentModelId].modes[m]?.name || m}] 的购物车`); }
     }
-    function clearCart() { contextData[getContext()].cart = []; saveCart(getContext()); renderItems(true); hideModal('cartModal'); showToast('当前购物车已清空'); }
+    
+    function clearCart() { 
+        contextData[getContext()].cart = []; 
+        syncDB(); 
+        renderItems(true); 
+        openCartModal(); 
+        showToast('当前购物车已清空'); 
+    }
     
     function openCartModal() {
         const list = document.getElementById('cartItemsList'); list.innerHTML = '';
         contextData[getContext()].cart.forEach((item, i) => {
             const div = document.createElement('div'); div.className = 'list-item';
-            
             const weight = contextData[getContext()].metadata[item]?.cartWeight ?? 1.0;
-            
             div.innerHTML = `
                 <div class="list-item-content">
                     <div class="list-thumbnail-placeholder" id="cart_thumb_${i}">🖼️</div>
                     <span style="font-weight:bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;">${escapeHtml(item)}</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <input type="number" step="0.1" value="${weight}" class="input-text cart-weight-input" style="width:70px; margin:0; padding:6px; font-size:0.85rem;" data-item="${escapeHtml(item)}" title="权重调节">
+                    <input type="number" step="0.1" value="${weight}" class="input-text cart-weight-input" style="width:70px; margin:0; padding:6px; font-size:0.85rem;">
                     <button class="btn btn-danger btn-rm" style="padding:4px 10px;">移除</button>
                 </div>`;
             
-            if (contextData[getContext()].imageCount.get(item) > 0) {
-                getFirstImage(item, getContext()).then(img => {
-                    if (img) {
-                        const ph = div.querySelector(`#cart_thumb_${i}`);
-                        if (ph) {
-                            ph.outerHTML = `<img src="${img}" class="list-thumbnail" id="cart_thumb_${i}">`;
-                            div.querySelector(`#cart_thumb_${i}`).onclick = (e) => { fsImg(img); e.stopPropagation(); };
-                        }
-                    }
-                });
-            }
+            getFirstImage(item, getContext()).then(img => {
+                if (img) { const ph = div.querySelector(`#cart_thumb_${i}`); if (ph) { ph.outerHTML = `<img src="${img}" class="list-thumbnail" id="cart_thumb_${i}">`; div.querySelector(`#cart_thumb_${i}`).onclick = (e) => { fsImg(img); e.stopPropagation(); }; } }
+            });
 
             div.querySelector('.btn-rm').onclick = () => { toggleCart(item, getContext()); openCartModal(); };
-            
             div.querySelector('.cart-weight-input').oninput = (e) => {
                 const w = parseFloat(e.target.value);
-                if (!isNaN(w)) {
-                    if(!contextData[getContext()].metadata[item]) contextData[getContext()].metadata[item] = { tags: [] };
-                    contextData[getContext()].metadata[item].cartWeight = w;
-                    saveMetadata(getContext());
-                }
+                if (!isNaN(w)) { if(!contextData[getContext()].metadata[item]) contextData[getContext()].metadata[item] = { tags: [] }; contextData[getContext()].metadata[item].cartWeight = w; syncDB(); }
             };
-            
             list.appendChild(div);
         });
         showModal('cartModal');
@@ -2764,36 +2161,25 @@
         const parts = [];
         contextData[getContext()].cart.forEach(item => {
             const w = contextData[getContext()].metadata[item]?.cartWeight ?? 1.0;
-            if(w !== 1.0 && !isNaN(w)) {
-                parts.push(`(${item}:${w})`);
-            } else {
-                parts.push(item);
-            }
+            if(w !== 1.0 && !isNaN(w)) parts.push(`(${item}:${w})`); else parts.push(item);
         });
         const p = parts.join(', ');
-        
-        if(!p) return showToast('当前购物车为空'); 
-        copyTxt(p); 
+        if(!p) return showToast('当前购物车为空'); copyTxt(p); 
     }
 
     function deleteItemDirect(item, ctx) {
         if(!confirm('确定彻底删除此卡片及其所有图片吗？')) return;
         const d = contextData[ctx];
-
-        d.items = d.items.filter(x=>x!==item); 
-        d.cart = d.cart.filter(x=>x!==item);
-        delete d.metadata[item];
-        d.groups.forEach(g => g.items = g.items.filter(x=>x!==item));
-        d.combos.forEach(c => c.elements = c.elements.filter(e => e.tag !== item));
+        d.items = d.items.filter(x=>x!==item); d.cart = d.cart.filter(x=>x!==item); delete d.metadata[item];
+        d.groups.forEach(g => g.items = g.items.filter(x=>x!==item)); d.combos.forEach(c => c.elements = c.elements.filter(e => e.tag !== item));
         
-        if(d.imageCount.has(item)) { 
-            d.imageCount.delete(item); 
-            db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).delete(`${ctx}_${item}`); 
+        const imgKey = ctx + '_' + item;
+        if(globalDB.images[imgKey]) {
+            globalDB.images[imgKey].forEach(url => deletePhysicalFile(url)); 
+            delete globalDB.images[imgKey];
         }
-        
-        saveContextCore(ctx); saveGroups(ctx); saveCombos(ctx);
-        renderItems(true); 
-        showToast('删除成功');
+        d.imageCount.delete(item); 
+        syncDB(); renderItems(true); showToast('删除成功');
     }
 
     let editItemTarget = { item: null, ctx: null };
@@ -2807,15 +2193,10 @@
 
     function updateItem() {
         const n = sanitizePrompt(document.getElementById('itemNameInput').value.trim()); 
-        const remark = document.getElementById('itemRemarkInput').value.trim();
-        const t = document.getElementById('itemTagsInput').value.trim();
-        
+        const remark = document.getElementById('itemRemarkInput').value.trim(); const t = document.getElementById('itemTagsInput').value.trim();
         if(!n) return showToast('请输入有效名称');
         
-        const ctx = editItemTarget.ctx;
-        const oldItem = editItemTarget.item;
-        const d = contextData[ctx];
-
+        const ctx = editItemTarget.ctx; const oldItem = editItemTarget.item; const d = contextData[ctx];
         if(n !== oldItem && d.items.includes(n)) return showToast('名称已存在');
         
         if(n !== oldItem) {
@@ -2824,45 +2205,27 @@
             if(d.cart.includes(oldItem)) d.cart[d.cart.indexOf(oldItem)] = n;
             d.groups.forEach(g => { const i=g.items.indexOf(oldItem); if(i>-1) g.items[i]=n; });
             d.combos.forEach(c => { c.elements.forEach(e => { if(e.tag === oldItem) e.tag = n; }); });
-            saveCombos(ctx);
 
-            if(d.imageCount.has(oldItem)) {
-                d.imageCount.set(n, d.imageCount.get(oldItem));
+            const oldImgKey = ctx + '_' + oldItem;
+            const newImgKey = ctx + '_' + n;
+            if(globalDB.images[oldImgKey]) {
+                globalDB.images[newImgKey] = globalDB.images[oldImgKey];
+                delete globalDB.images[oldImgKey];
+                d.imageCount.set(n, globalDB.images[newImgKey].length);
                 d.imageCount.delete(oldItem);
-                
-                const tx = db.transaction([STORE_IMG], 'readwrite');
-                const store = tx.objectStore(STORE_IMG);
-                store.get(`${ctx}_${oldItem}`).onsuccess = e => {
-                    if (e.target.result) {
-                        const imgs = e.target.result.imageData;
-                        store.put({id: `${ctx}_${n}`, mode: ctx, name: n, imageData: imgs});
-                        store.delete(`${ctx}_${oldItem}`);
-                    }
-                };
             }
         }
-
         if(!d.metadata[n]) d.metadata[n] = {tags:[]};
-        d.metadata[n].remark = remark;
-        d.metadata[n].tags = t.split(',').map(x=>x.trim()).filter(x=>x);
-
-        saveContextCore(ctx); saveGroups(ctx); 
-        hideModal('editItemModal'); 
-        renderItems(true); 
-        updateTagCloud();
-        showToast('保存成功');
+        d.metadata[n].remark = remark; d.metadata[n].tags = t.split(',').map(x=>x.trim()).filter(x=>x);
+        syncDB(); hideModal('editItemModal'); renderItems(true); updateTagCloud(); showToast('保存成功');
     }
 
     function updateGroupCardDOM(item, ctx) {
-        const d = contextData[ctx];
-        const inGrp = d.groups.some(g => g.items.includes(item));
+        const inGrp = contextData[ctx].groups.some(g => g.items.includes(item));
         for (let [i, card] of activeCards.entries()) {
             if(card.dataset.rawItem === item && card.dataset.ctx === ctx) {
                 const btn = card.querySelector('.btn-group');
-                if(btn) {
-                    if(inGrp) { btn.classList.add('active'); btn.innerText = '⭐'; }
-                    else { btn.classList.remove('active'); btn.innerText = '☆'; }
-                }
+                if(btn) { if(inGrp) { btn.classList.add('active'); btn.innerText = '⭐'; } else { btn.classList.remove('active'); btn.innerText = '☆'; } }
             }
         }
     }
@@ -2883,7 +2246,7 @@
             div.ondragstart = e => { dragGrpIdx = idx; div.style.opacity='0.5'; };
             div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
             div.ondragleave = e => div.classList.remove('drag-over');
-            div.ondrop = e => { e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; if(dragGrpIdx!==null && dragGrpIdx!==idx) { const it = grps.splice(dragGrpIdx,1)[0]; grps.splice(idx,0,it); saveGroups(getContext()); openGroupsModal(); showToast('排序已更新'); } };
+            div.ondrop = e => { e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; if(dragGrpIdx!==null && dragGrpIdx!==idx) { const it = grps.splice(dragGrpIdx,1)[0]; grps.splice(idx,0,it); syncDB(); openGroupsModal(); showToast('排序已更新'); } };
             div.ondragend = () => div.style.opacity='1';
             list.appendChild(div);
         });
@@ -2891,8 +2254,7 @@
     }
     let editGrpIdxTarget = null;
     function openEditGroupModal(idx=null) {
-        editGrpIdxTarget = idx;
-        const g = idx!==null ? contextData[getContext()].groups[idx] : {name:'', description:''};
+        editGrpIdxTarget = idx; const g = idx!==null ? contextData[getContext()].groups[idx] : {name:'', description:''};
         document.getElementById('groupNameInput').value = g.name; document.getElementById('groupDescInput').value = g.description||'';
         showModal('editGroupModal');
     }
@@ -2902,14 +2264,12 @@
         const grps = contextData[getContext()].groups;
         if(editGrpIdxTarget!==null) { grps[editGrpIdxTarget].name=n; grps[editGrpIdxTarget].description=d; }
         else grps.push({ name:n, description:d, items:[], mode:getContext() });
-        saveGroups(getContext()); hideModal('editGroupModal'); openGroupsModal(); updateBadges();
+        syncDB(); hideModal('editGroupModal'); openGroupsModal(); updateBadges();
     }
     function delGroup(idx) { 
         if(confirm('确认删除分组？')) { 
-            const items = contextData[getContext()].groups[idx].items;
-            contextData[getContext()].groups.splice(idx,1); 
-            saveGroups(getContext()); openGroupsModal(); updateBadges(); 
-            items.forEach(i => updateGroupCardDOM(i, getContext()));
+            const items = contextData[getContext()].groups[idx].items; contextData[getContext()].groups.splice(idx,1); 
+            syncDB(); openGroupsModal(); updateBadges(); items.forEach(i => updateGroupCardDOM(i, getContext()));
         } 
     }
     
@@ -2930,34 +2290,17 @@
                     <button class="btn btn-outline btn-cart-item" style="padding:4px 10px;">🛒</button>
                     <button class="btn btn-danger btn-rm" style="padding:4px 10px;">移除</button>
                 </div>`;
-            
-            if (contextData[ctx].imageCount.get(i) > 0) {
-                getFirstImage(i, ctx).then(img => {
-                    if (img) {
-                        const ph = div.querySelector(`#grp_thumb_${countIdx}`);
-                        if (ph) {
-                            ph.outerHTML = `<img src="${img}" class="list-thumbnail" id="grp_thumb_${countIdx}">`;
-                            div.querySelector(`#grp_thumb_${countIdx}`).onclick = (e) => { fsImg(img); e.stopPropagation(); };
-                        }
-                    }
-                });
-            }
-            
+            getFirstImage(i, ctx).then(img => {
+                if (img) { const ph = div.querySelector(`#grp_thumb_${countIdx}`); if (ph) { ph.outerHTML = `<img src="${img}" class="list-thumbnail" id="grp_thumb_${countIdx}">`; div.querySelector(`#grp_thumb_${countIdx}`).onclick = (e) => { fsImg(img); e.stopPropagation(); }; } }
+            });
             div.querySelector('.btn-copy-item').onclick = () => copyTxt(i);
             div.querySelector('.btn-cart-item').onclick = () => { toggleCart(i, ctx); };
             div.querySelector('.btn-rm').onclick = () => { rmFromGrp(i, ctx); };
-            
             c.appendChild(div);
         });
         showModal('groupDetailModal');
     }
-    function rmFromGrp(i, ctx) { 
-        viewGrpTarget.group.items = viewGrpTarget.group.items.filter(x=>x!==i); 
-        saveGroups(ctx); 
-        viewGroup(contextData[ctx].groups.indexOf(viewGrpTarget.group), ctx); 
-        updateGroupCardDOM(i, ctx);
-        updateBadges(); 
-    }
+    function rmFromGrp(i, ctx) { viewGrpTarget.group.items = viewGrpTarget.group.items.filter(x=>x!==i); syncDB(); viewGroup(contextData[ctx].groups.indexOf(viewGrpTarget.group), ctx); updateGroupCardDOM(i, ctx); updateBadges(); }
     function exportGroupPrompt() { copyTxt(viewGrpTarget.group.items.join(', ')); }
     
     let selectGrpItem = { item: null, ctx: null };
@@ -2965,27 +2308,19 @@
         selectGrpItem = { item, ctx }; const c = document.getElementById('groupSelectList'); c.innerHTML='';
         const grps = contextData[ctx].groups; if(!grps.length) return showToast('该分类下暂无分组，请先在左侧创建');
         grps.forEach((g, i) => {
-            const has = g.items.includes(item);
-            const div = document.createElement('div'); div.className='list-item'; div.style.cursor='pointer';
+            const has = g.items.includes(item); const div = document.createElement('div'); div.className='list-item'; div.style.cursor='pointer';
             div.innerHTML = `<label style="display:flex;align-items:center;width:100%;cursor:pointer;"><input type="checkbox" id="cb_g_${i}" ${has?'checked':''} style="margin-right:10px;transform:scale(1.2);"><b>${escapeHtml(g.name)}</b></label>`;
             c.appendChild(div);
         });
         showModal('groupSelectModal');
     }
     function confirmGroupSelect() {
-        const ctx = selectGrpItem.ctx;
-        const grps = contextData[ctx].groups;
+        const ctx = selectGrpItem.ctx; const grps = contextData[ctx].groups;
         grps.forEach((g, i) => { 
-            const chk = document.getElementById('cb_g_'+i).checked; 
-            const has = g.items.includes(selectGrpItem.item); 
-            if(chk && !has) g.items.push(selectGrpItem.item); 
-            else if(!chk && has) g.items = g.items.filter(x=>x!==selectGrpItem.item); 
+            const chk = document.getElementById('cb_g_'+i).checked; const has = g.items.includes(selectGrpItem.item); 
+            if(chk && !has) g.items.push(selectGrpItem.item); else if(!chk && has) g.items = g.items.filter(x=>x!==selectGrpItem.item); 
         });
-        saveGroups(ctx); 
-        hideModal('groupSelectModal'); 
-        updateGroupCardDOM(selectGrpItem.item, ctx);
-        updateBadges();
-        showToast('已更新分组');
+        syncDB(); hideModal('groupSelectModal'); updateGroupCardDOM(selectGrpItem.item, ctx); updateBadges(); showToast('已更新分组');
     }
 
     let dragComboIdx = null;
@@ -2995,9 +2330,7 @@
         if(!cbs.length) list.innerHTML = '<div style="color:var(--text-light);text-align:center;">暂无组合</div>';
         cbs.forEach((c, idx) => {
             const imgHtml = c.image ? `<img src="${c.image}" class="list-thumbnail" style="width:60px;height:60px;">` : `<div class="list-thumbnail-placeholder" style="width:60px;height:60px;font-size:1.5rem;">🔗</div>`;
-            const div = document.createElement('div'); div.className = 'list-item'; div.style.alignItems='flex-start';
-            div.draggable = true;
-            
+            const div = document.createElement('div'); div.className = 'list-item'; div.style.alignItems='flex-start'; div.draggable = true;
             div.innerHTML = `
                 <div class="list-item-content" style="align-items:flex-start;">
                     ${imgHtml}
@@ -3011,28 +2344,15 @@
                     <button class="btn btn-outline btn-edit" style="padding:4px 8px;font-size:0.8rem;">编辑</button>
                     <button class="btn btn-danger btn-del" style="padding:4px 8px;font-size:0.8rem;">删除</button>
                 </div>`;
-            
             if(c.image) div.querySelector('.list-thumbnail').onclick = (e) => { fsImg(c.image); e.stopPropagation(); };
             div.querySelector('.btn-copy').onclick = () => copyTxt(c.elements.map(e=>e.weight!=1?`(${e.tag}:${e.weight})`:e.tag).join(', '));
             div.querySelector('.btn-edit').onclick = () => openEditCombinationModal(idx);
             div.querySelector('.btn-del').onclick = () => delCombo(idx);
-            
             div.ondragstart = e => { dragComboIdx = idx; div.style.opacity='0.5'; };
             div.ondragover = e => { e.preventDefault(); div.classList.add('drag-over'); };
             div.ondragleave = e => div.classList.remove('drag-over');
-            div.ondrop = e => { 
-                e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; 
-                if(dragComboIdx!==null && dragComboIdx!==idx) { 
-                    const it = cbs.splice(dragComboIdx,1)[0]; 
-                    cbs.splice(idx,0,it); 
-                    saveCombos(getContext()); 
-                    openCombinationsModal(); 
-                    updateBadges(); 
-                    showToast('组合排序已更新');
-                } 
-            };
+            div.ondrop = e => { e.preventDefault(); div.classList.remove('drag-over'); div.style.opacity='1'; if(dragComboIdx!==null && dragComboIdx!==idx) { const it = cbs.splice(dragComboIdx,1)[0]; cbs.splice(idx,0,it); syncDB(); openCombinationsModal(); updateBadges(); showToast('组合排序已更新'); } };
             div.ondragend = () => div.style.opacity='1';
-
             list.appendChild(div);
         });
         showModal('combinationsModal');
@@ -3044,19 +2364,45 @@
         const c = idx!==null ? contextData[getContext()].combos[idx] : {name:'', elements:[], image:null};
         document.getElementById('comboNameInput').value = c.name;
         if(c.elements.length===0) addComboRow(); else c.elements.forEach(e => addComboRow(e.tag, e.weight));
+        
         const pc = document.getElementById('comboPreview');
-        if(c.image) pc.innerHTML=`<img src="${c.image}" style="width:100%;height:100%;object-fit:contain;"><button class="del-img-btn" style="position:absolute;top:5px;right:5px;" onclick="this.parentElement.innerHTML='<span class=\\'preview-placeholder\\'>点击或拖拽上传</span>'">×</button>`;
+        if(c.image) pc.innerHTML=`<img src="${c.image}" style="width:100%;height:100%;object-fit:contain;"><button class="del-img-btn" style="position:absolute;top:5px;right:5px;" onclick="deletePhysicalFile('${c.image}'); this.parentElement.innerHTML='<span class=\\'preview-placeholder\\'>点击或拖拽上传</span>'">×</button>`;
         else pc.innerHTML = `<span class="preview-placeholder">点击或拖拽上传</span>`;
         
         pc.onclick = e => { if(e.target.tagName==='BUTTON'||e.target.tagName==='IMG')return; const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*'; inp.onchange=ev=>{if(ev.target.files[0])handleComboImg(ev.target.files[0]);}; inp.click(); };
+        
+        pc.ondragover = e => e.preventDefault();
+        pc.ondrop = e => { e.preventDefault(); if(e.dataTransfer.files[0]) handleComboImg(e.dataTransfer.files[0]); };
+        
         showModal('editCombinationModal');
     }
-    function handleComboImg(f) { const r=new FileReader(); r.onload=e=>{compress(e.target.result).then(res=>{document.getElementById('comboPreview').innerHTML=`<img src="${res}" style="width:100%;height:100%;object-fit:contain;"><button class="del-img-btn" style="position:absolute;top:5px;right:5px;" onclick="this.parentElement.innerHTML='<span class=\\'preview-placeholder\\'>点击或拖拽上传</span>'">×</button>`;});}; r.readAsDataURL(f); }
+
+    async function handleComboImg(f) {
+        showProgress('正在上传预览图...');
+        const r = new FileReader();
+        r.onload = async e => {
+            const compressed = await compress(e.target.result);
+            const safeName = "combo_" + Date.now();
+            const ctx = getContext();
+            try {
+                const res = await fetch('/api/prompt-manager/upload', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ image: compressed, filename: `${safeName}.png`, subfolder: ctx })
+                });
+                const json = await res.json();
+                if(json.success) {
+                    document.getElementById('comboPreview').innerHTML = `<img src="${json.url}" style="width:100%;height:100%;object-fit:contain;"><button class="del-img-btn" style="position:absolute;top:5px;right:5px;" onclick="deletePhysicalFile('${json.url}'); this.parentElement.innerHTML='<span class=\\'preview-placeholder\\'>点击或拖拽上传</span>'">×</button>`;
+                }
+            } catch(e) { console.error("上传组合图片失败", e); }
+            hideProgress();
+        };
+        r.readAsDataURL(f);
+    }
+
     function addComboRow(tag='', weight=1) {
         const div = document.createElement('div'); div.style.display='flex'; div.style.gap='5px'; div.style.marginBottom='5px';
         div.innerHTML = `<input type="text" class="input-text tag-inp" style="margin:0;flex:2;" placeholder="标签/名称"><input type="number" step="0.1" class="input-text weight-inp" style="margin:0;flex:1;" placeholder="权重"><button class="btn btn-danger" style="padding:0 10px;" onclick="this.parentElement.remove()">×</button>`;
-        div.querySelector('.tag-inp').value = tag;
-        div.querySelector('.weight-inp').value = weight;
+        div.querySelector('.tag-inp').value = tag; div.querySelector('.weight-inp').value = weight;
         document.getElementById('comboElements').appendChild(div);
     }
     function importCartToCombo() { contextData[getContext()].cart.forEach(i=>addComboRow(i, 1)); }
@@ -3064,13 +2410,20 @@
         const n = document.getElementById('comboNameInput').value.trim(); if(!n) return showToast('请输入组合名');
         const els = []; document.getElementById('comboElements').querySelectorAll('div').forEach(d=>{ const t=d.children[0].value.trim(), w=d.children[1].value; if(t) els.push({tag:t, weight:w}); });
         if(!els.length) return showToast('至少需要一个标签');
-        const img = document.querySelector('#comboPreview img')?.src || null;
+        const img = document.querySelector('#comboPreview img')?.getAttribute('src') || null;
         const cbs = contextData[getContext()].combos;
         if(editComboIdx!==null) { cbs[editComboIdx].name=n; cbs[editComboIdx].elements=els; cbs[editComboIdx].image=img; }
         else cbs.push({ name:n, elements:els, image:img, mode:getContext() });
-        saveCombos(getContext()); hideModal('editCombinationModal'); openCombinationsModal(); updateBadges(); showToast('保存成功');
+        syncDB(); hideModal('editCombinationModal'); openCombinationsModal(); updateBadges(); showToast('保存成功');
     }
-    function delCombo(idx) { if(confirm('删除此组合？')){ contextData[getContext()].combos.splice(idx,1); saveCombos(getContext()); openCombinationsModal(); updateBadges(); } }
+    function delCombo(idx) { 
+        if(confirm('删除此组合？')){ 
+            const img = contextData[getContext()].combos[idx].image;
+            if(img) deletePhysicalFile(img);
+            contextData[getContext()].combos.splice(idx,1); 
+            syncDB(); openCombinationsModal(); updateBadges(); 
+        } 
+    }
 
     let currentCreateTab = 'img';
     function switchCreateTab(tabId) {
@@ -3089,90 +2442,67 @@
 
     async function startBatchCreate() {
         const files = document.getElementById('batchFileInput').files; if(!files.length) return showToast('未选文件');
-        
-        showProgress('批量创建中...', '正在压缩并保存图片');
-        const ctx = getContext();
-        const d = contextData[ctx]; let created = 0, updated = 0;
+        showProgress('批量创建中...', '正在保存图片至服务器');
+        const ctx = getContext(); const d = contextData[ctx]; let created = 0, updated = 0;
         
         for(let i=0; i<files.length; i++) {
             const f = files[i]; if(!f.type.match('image.*')) continue;
-            const name = sanitizePrompt(f.name.replace(/\.[^/.]+$/, ""));
-            if(!name) continue;
+            const name = sanitizePrompt(f.name.replace(/\.[^/.]+$/, "")); if(!name) continue;
             
             if(!d.items.includes(name)) { d.items.push(name); d.metadata[name]={tags:[]}; created++; } else updated++;
             const dataUrl = await new Promise(res=>{ const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(f); });
             const compressed = await compress(dataUrl).catch(()=>dataUrl);
             
-            let existingImgs = [];
-            const record = await new Promise(res => {
-                db.transaction([STORE_IMG]).objectStore(STORE_IMG).get(`${ctx}_${name}`).onsuccess = e => res(e.target.result);
+            const imgKey = ctx + '_' + name;
+            const safeName = sanitizePrompt(name).replace(/[^a-zA-Z0-9]/g, '');
+            const res = await fetch('/api/prompt-manager/upload', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ image: compressed, filename: `upload_${safeName}_${Date.now()}_${i}.png`, subfolder: ctx })
             });
-            if (record && record.imageData) {
-                existingImgs = Array.isArray(record.imageData) ? record.imageData : [record.imageData];
+            const json = await res.json();
+            if(json.success) {
+                if(!globalDB.images[imgKey]) globalDB.images[imgKey] = [];
+                globalDB.images[imgKey].push(json.url);
             }
-
-            existingImgs.push(compressed);
-            db.transaction([STORE_IMG], 'readwrite').objectStore(STORE_IMG).put({id:`${ctx}_${name}`, mode:ctx, name:name, imageData:existingImgs});
-            
-            d.imageCount.set(name, existingImgs.length);
+            d.imageCount.set(name, globalDB.images[imgKey].length);
             if(!d.metadata[name]) d.metadata[name] = {tags:[]};
-            d.metadata[name].imgCount = existingImgs.length;
+            d.metadata[name].imgCount = globalDB.images[imgKey].length;
             
             updateProgress(((i+1)/files.length)*100, `处理中 ${i+1}/${files.length}`);
-            if(i % 5 === 0) await new Promise(r=>setTimeout(r, 0)); 
         }
-        saveContextCore(ctx); 
-        document.getElementById('batchFileInput').value='';
-        
+        syncDB(); document.getElementById('batchFileInput').value='';
         hideProgress(); hideModal('batchCreateModal'); triggerSearch(true); showToast(`完成: 新建${created}，更新${updated}`);
     }
 
     function createSinglePrompt() {
-        const val = sanitizePrompt(document.getElementById('singlePromptInput').value.trim());
-        if(!val) return showToast('请输入有效内容');
-        const ctx = getContext();
-        const d = contextData[ctx];
+        const val = sanitizePrompt(document.getElementById('singlePromptInput').value.trim()); if(!val) return showToast('请输入有效内容');
+        const ctx = getContext(); const d = contextData[ctx];
         if(d.items.includes(val)) return showToast('该卡片已存在');
         d.items.push(val); d.metadata[val] = { tags: [] };
-        saveContextCore(ctx); triggerSearch(true); 
-        document.getElementById('singlePromptInput').value = '';
+        syncDB(); triggerSearch(true); document.getElementById('singlePromptInput').value = '';
         hideModal('batchCreateModal'); showToast('创建成功');
     }
 
     function createFromTxt() {
-        const files = document.getElementById('txtFileInput').files;
-        if(!files.length) return showToast('请选择 TXT 文件');
+        const files = document.getElementById('txtFileInput').files; if(!files.length) return showToast('请选择 TXT 文件');
         const file = files[0]; const reader = new FileReader();
-        const byComma = document.getElementById('splitByComma').checked;
-        const byNewline = document.getElementById('splitByNewline').checked;
+        const byComma = document.getElementById('splitByComma').checked, byNewline = document.getElementById('splitByNewline').checked;
 
         reader.onload = function(e) {
-            let text = e.target.result;
-            
-            if(!byNewline) text = text.replace(/[\r\n]+/g, ' ');
-
+            let text = e.target.result; if(!byNewline) text = text.replace(/[\r\n]+/g, ' ');
             let rawPrompts = [text];
-            if(byComma && byNewline) {
-                rawPrompts = text.split(/[,\r\n]+/);
-            } else if(byComma) {
-                rawPrompts = text.split(/,/);
-            } else if(byNewline) {
-                rawPrompts = text.split(/[\r\n]+/);
-            }
+            if(byComma && byNewline) rawPrompts = text.split(/[,\r\n]+/);
+            else if(byComma) rawPrompts = text.split(/,/);
+            else if(byNewline) rawPrompts = text.split(/[\r\n]+/);
 
             const prompts = rawPrompts.map(x => sanitizePrompt(x.trim())).filter(x => x);
             if(!prompts.length) return showToast('未找到有效内容');
-            
-            const ctx = getContext();
-            const d = contextData[ctx]; let added = 0;
+            const ctx = getContext(); const d = contextData[ctx]; let added = 0;
             prompts.forEach(p => { if(!d.items.includes(p)) { d.items.push(p); d.metadata[p] = { tags: [] }; added++; } });
             
-            if(added > 0) { saveContextCore(ctx); triggerSearch(true); showToast(`成功导入并创建了 ${added} 个新卡片`); } 
+            if(added > 0) { syncDB(); triggerSearch(true); showToast(`成功导入并创建了 ${added} 个新卡片`); } 
             else { showToast('文件中没有新的卡片内容'); }
-            
-            document.getElementById('txtFileInput').value = '';
-            document.getElementById('txtFileInfo').innerText = '';
-            hideModal('batchCreateModal');
+            document.getElementById('txtFileInput').value = ''; document.getElementById('txtFileInfo').innerText = ''; hideModal('batchCreateModal');
         };
         reader.readAsText(file);
     }
@@ -3192,22 +2522,17 @@
     
     function executeBatchEdit() {
         const act = document.getElementById('batchActionSelect').value; 
-        const dirtyCtxs = new Set();
-        
         if(act==='add-tags'||act==='remove-tags') {
             const tags = document.getElementById('batchTagInput').value.split(',').map(x=>x.trim()).filter(x=>x);
             batchSelection.forEach(batchKey => {
-                const [ctx, item] = batchKey.split('||');
-                const d = contextData[ctx]; if(!d) return;
+                const [ctx, item] = batchKey.split('||'); const d = contextData[ctx]; if(!d) return;
                 if(!d.metadata[item]) d.metadata[item]={tags:[]}; 
                 if(act==='add-tags') d.metadata[item].tags=[...new Set([...d.metadata[item].tags, ...tags])]; 
                 else d.metadata[item].tags=d.metadata[item].tags.filter(x=>!tags.includes(x)); 
-                dirtyCtxs.add(ctx);
             });
-            dirtyCtxs.forEach(ctx => saveMetadata(ctx));
+            syncDB();
         } else {
-            const gName = document.getElementById('batchGroupSelect').value;
-            const targetCtx = getContext();
+            const gName = document.getElementById('batchGroupSelect').value; const targetCtx = getContext();
             const g = contextData[targetCtx].groups.find(x=>x.name===gName);
             if(g) {
                 batchSelection.forEach(batchKey => { 
@@ -3217,133 +2542,43 @@
                         else if(act==='remove-from-group') g.items=g.items.filter(x=>x!==item); 
                     }
                 });
-                saveGroups(targetCtx);
+                syncDB();
             }
         }
-        hideModal('batchEditModal'); 
-        toggleBatchMode(); 
-        showToast('批量操作已成功应用');
+        hideModal('batchEditModal'); toggleBatchMode(); showToast('批量操作已成功应用');
     }
     
     function batchDeleteImages() {
-        if(!confirm('清空当前搜索列表中包含的所有卡片的缓存图片？(该操作可能需要数秒钟)')) return;
-        
-        const tx = db.transaction([STORE_IMG], 'readwrite');
-        const st = tx.objectStore(STORE_IMG);
+        if(!confirm('清空当前搜索列表中包含的所有卡片的图片记录与物理文件？')) return;
         let count = 0;
-        
         currentSearchCtxs.forEach(ctx => {
-            const d = contextData[ctx];
-            if(!d) return;
+            const d = contextData[ctx]; if(!d) return;
             d.items.forEach(i => {
-                if(d.imageCount.get(i) > 0) {
+                const imgKey = ctx + '_' + i;
+                if(globalDB.images[imgKey] && globalDB.images[imgKey].length > 0) {
+                    globalDB.images[imgKey].forEach(url => deletePhysicalFile(url)); // 物理删除
+                    delete globalDB.images[imgKey];
                     d.imageCount.set(i, 0);
                     if(d.metadata[i]) d.metadata[i].imgCount = 0;
-                    st.delete(`${ctx}_${i}`);
                     count++;
                 }
             });
-            saveMetadata(ctx);
         });
-        
-        tx.oncomplete = () => {
-            renderItems(true);
-            updateBadges();
-            showToast(`已成功清空 ${count} 张图片`);
-        };
-        tx.onerror = () => {
-            showToast('清理图片失败，请重试');
-        };
+        syncDB(); renderItems(true); updateBadges(); showToast(`已成功清空 ${count} 张图片的记录及物理文件`);
     }
 
-    function openExportModal() {
-        showModal('exportModal');
-    }
+    function openExportModal() { showModal('exportModal'); }
 
     async function executeExport() {
-        const scope = document.getElementById('exportScopeSelect').value;
-        const includeImages = document.getElementById('exportIncludeImages').checked;
-        
-        let targetCtxs = [];
-        if (scope === 'current_mode') {
-            targetCtxs.push(getContext());
-        } else if (scope === 'current_category') {
-            const catId = MODELS[currentModelId].modes[currentModeId].group;
-            Object.keys(MODELS[currentModelId].modes).forEach(mId => {
-                if(MODELS[currentModelId].modes[mId].group === catId || (!MODELS[currentModelId].modes[mId].group && catId==='custom')) {
-                    targetCtxs.push(`${currentModelId}_${mId}`);
-                }
-            });
-        } else if (scope === 'current_model') {
-            Object.keys(MODELS[currentModelId].modes).forEach(mId => {
-                targetCtxs.push(`${currentModelId}_${mId}`);
-            });
-        }
-
         hideModal('exportModal');
-        showProgress('正在整理导出数据...', '正在急速打包中，请稍候');
-
-        const expData = {
-            type: 'multi_export',
-            version: '4.0',
-            timestamp: Date.now(),
-            scope: scope,
-            contexts: {}
-        };
-
-        for (let ctx of targetCtxs) {
-            await loadContextData(ctx);
-            const d = contextData[ctx];
-            
-            const modeId = ctx.substring(ctx.indexOf('_') + 1);
-            const modelId = ctx.substring(0, ctx.indexOf('_'));
-            const modeInfo = MODELS[modelId]?.modes[modeId] || { name: modeId, icon: '📁', group: 'custom' };
-            
-            const imagesObj = {};
-            if (includeImages) {
-                await new Promise(res => {
-                    const tx = db.transaction([STORE_IMG], 'readonly');
-                    const store = tx.objectStore(STORE_IMG);
-                    const range = IDBKeyRange.bound(`${ctx}_`, `${ctx}_\uffff`);
-                    store.openCursor(range).onsuccess = e => {
-                        const cursor = e.target.result;
-                        if(cursor) {
-                            if(d.items.includes(cursor.value.name)) {
-                                imagesObj[cursor.value.name] = cursor.value.imageData;
-                            }
-                            cursor.continue();
-                        } else res();
-                    };
-                });
-            }
-
-            expData.contexts[ctx] = {
-                modeInfo: modeInfo,
-                items: d.items,
-                cart: d.cart,
-                groups: d.groups,
-                combinations: d.combos,
-                metadata: d.metadata,
-                images: imagesObj
-            };
-        }
-
-        updateProgress(100, '正在生成并下载文件...', '马上就好');
-        
+        showProgress('数据导出中...', '即将为您下载全局 JSON 文件');
         setTimeout(() => {
             try {
-                const url = URL.createObjectURL(new Blob([JSON.stringify(expData)], {type:'application/json'}));
-                const a = document.createElement('a'); a.href=url; 
-                const imgLabel = includeImages ? 'Full' : 'NoImg';
-                a.download=`promptV4_${scope}_${imgLabel}_${Date.now()}.json`; a.click();
-                hideProgress();
-                showToast('导出完成！');
-            } catch(err) {
-                console.error(err);
-                hideProgress();
-                alert('导出失败！可能是因为图片过多导致浏览器内存(字符串限制)超载。\n\n建议：取消勾选包含图片，或缩小导出范围。');
-            }
-        }, 300);
+                const url = URL.createObjectURL(new Blob([JSON.stringify(globalDB)], {type:'application/json'}));
+                const a = document.createElement('a'); a.href=url; a.download=`promptV4_Backup_${Date.now()}.json`; a.click();
+                hideProgress(); showToast('导出完成！');
+            } catch(err) { console.error(err); hideProgress(); alert('导出失败'); }
+        }, 500);
     }
 
     function exportToTxt() {
@@ -3352,201 +2587,332 @@
         const a = document.createElement('a'); a.href=url; a.download=`list_${Date.now()}.txt`; a.click();
     }
 
+// === 修复点 1：万能适配器，自动识别新旧版本并统一格式 ===
     document.getElementById('importFileInput').onchange = e => {
         if(!e.target.files[0]) return;
         const r = new FileReader(); 
         r.onload = ev => {
             try {
                 const data = JSON.parse(ev.target.result);
-                pendingImportData = data;
+                let normalizedData = { contexts: {}, images: {} };
                 
+                // 格式 A：V4.0 Fix 刚出时的 multi_export 格式
                 if (data.type === 'multi_export' && data.contexts) {
-                    const scopeMap = { 'current_mode': '单子分类', 'current_category': '一大类', 'current_model': '一整个模型标签页' };
-                    document.getElementById('importSourceScope').innerText = scopeMap[data.scope] || data.scope || '未知范围';
-                    document.getElementById('importCtxCount').innerText = Object.keys(data.contexts).length;
-                } else {
-                    document.getElementById('importSourceScope').innerText = '老版本单分类数据';
+                    let ctxCount = 0;
+                    for (const [ctx, ctxData] of Object.entries(data.contexts)) {
+                        normalizedData.contexts[ctx] = {
+                            items: ctxData.items || [], cart: ctxData.cart || [],
+                            groups: ctxData.groups || [], combos: ctxData.combinations || ctxData.combos || [],
+                            metadata: ctxData.metadata || {}, modeInfo: ctxData.modeInfo || null
+                        };
+                        if (ctxData.images) {
+                            for (const [itemName, imgData] of Object.entries(ctxData.images)) {
+                                normalizedData.images[`${ctx}_${itemName}`] = Array.isArray(imgData) ? imgData : [imgData];
+                            }
+                        }
+                        ctxCount++;
+                    }
+                    document.getElementById('importSourceScope').innerText = data.scope === 'current_mode' ? '单分类备份' : '多分类/标签页备份';
+                    document.getElementById('importCtxCount').innerText = ctxCount;
+                } 
+                // 格式 B：极早期的单分类零散 JSON 备份
+                else if (data.items && data.metadata) {
+                    const ctx = data.context || data.mode || getContext();
+                    normalizedData.contexts[ctx] = {
+                        items: data.items || [], cart: data.cart || [],
+                        groups: data.groups || [], combos: data.combinations || data.combos || [],
+                        metadata: data.metadata || {}
+                    };
+                    if (data.images) {
+                        for (const [itemName, imgData] of Object.entries(data.images)) {
+                            normalizedData.images[`${ctx}_${itemName}`] = Array.isArray(imgData) ? imgData : [imgData];
+                        }
+                    }
+                    document.getElementById('importSourceScope').innerText = '旧版单分类数据';
                     document.getElementById('importCtxCount').innerText = 1;
+                } 
+                // 格式 C：当前最新版本的全局物理化 globalDB 备份
+                else if (data.contexts) {
+                    normalizedData = data;
+                    document.getElementById('importSourceScope').innerText = '最新版全量架构数据';
+                    document.getElementById('importCtxCount').innerText = Object.keys(data.contexts || {}).length;
+                } 
+                else {
+                    throw new Error("Unknown JSON structure");
                 }
+                
+                pendingImportData = normalizedData;
                 showModal('importSettingsModal');
-
-            } catch(err) { 
-                console.error(err);
-                alert('导入失败！文件格式可能已损坏或非标准 JSON。');
-                document.getElementById('importFileInput').value = '';
-            }
+            } catch(err) { console.error(err); alert('文件格式损坏或无法识别的数据结构！'); document.getElementById('importFileInput').value = ''; }
         }; 
         r.readAsText(e.target.files[0]);
     };
 
+    // === 修复点 2：导入时自动提取旧版 Base64 图片并转换为 data 物理文件 ===
     async function executeImport() {
         hideModal('importSettingsModal');
         const targetStrategy = document.querySelector('input[name="importTarget"]:checked').value;
         const isMerge = document.getElementById('importMergeCheck').checked;
-        const data = pendingImportData;
+        const data = pendingImportData; // 这里已经是上面处理好的 normalizedData
         
-        showProgress('正在分析并导入数据包...', '极速写入数据库中');
+        showProgress('正在分析并导入数据包...', '检查图片数据中...');
         
         try {
-            let contextsData = {};
-            if (data.type === 'multi_export') {
-                contextsData = data.contexts;
-            } else {
-                if (data.items && !Array.isArray(data.items)) throw new Error("Invalid items data");
-                contextsData[data.context || getContext()] = data;
-            }
-
-            let clearedCtxs = new Set();
-
-            for (let oldCtx of Object.keys(contextsData)) {
-                const cData = contextsData[oldCtx];
-                let targetCtx = oldCtx;
-
-                if (targetStrategy === 'current_tab') {
-                    let oldModeId = oldCtx;
-                    if (oldCtx.includes('_')) oldModeId = oldCtx.substring(oldCtx.indexOf('_') + 1);
-                    targetCtx = `${currentModelId}_${oldModeId}`;
-
-                    if (!MODELS[currentModelId].modes[oldModeId]) {
-                        const catId = MODELS[currentModelId].categories[0]?.id || 'custom';
-                        let mName = cData.modeInfo?.name || oldModeId;
-                        let mIcon = cData.modeInfo?.icon || '📁';
-                        MODELS[currentModelId].modes[oldModeId] = { name: mName, icon: mIcon, group: catId };
-                        saveModels();
-                    }
-                } else if (targetStrategy === 'current_mode') {
-                    targetCtx = getContext();
-                }
-
-                await loadContextData(targetCtx);
-                const d = contextData[targetCtx];
-
-                if (!isMerge && !clearedCtxs.has(targetCtx)) {
-                    d.items = []; d.cart = []; d.groups = []; d.combos = []; d.metadata = {};
-                    d.imageCount.clear(); 
-                    await clearContextData(targetCtx); 
-                    clearedCtxs.add(targetCtx);
-                }
-
-                if (cData.items) {
-                    const newItems = cData.items.filter(i => !d.items.includes(i));
-                    d.items = [...d.items, ...newItems]; 
-                }
-                if (cData.cart) {
-                    const newCart = cData.cart.filter(i => !d.cart.includes(i));
-                    d.cart = [...d.cart, ...newCart];
-                }
-                if (cData.metadata) {
-                    for (const [k, v] of Object.entries(cData.metadata)) {
-                        if (d.metadata[k]) {
-                            d.metadata[k].tags = [...new Set([...(d.metadata[k].tags||[]), ...(v.tags||[])])];
-                            if(v.remark) d.metadata[k].remark = v.remark;
-                            if(v.cartWeight) d.metadata[k].cartWeight = v.cartWeight;
-                            if(v.imgCount) d.metadata[k].imgCount = v.imgCount;
-                        } else d.metadata[k] = v;
+            if (data.contexts) {
+                let clearedCtxs = new Set();
+                let totalImages = 0;
+                let processedImages = 0;
+                
+                // 1. 统计需要物理化的老图片数量（超过1000字符或者是base64的）
+                if (data.images) {
+                    for (const arr of Object.values(data.images)) {
+                        totalImages += arr.filter(x => x.length > 1000 || x.startsWith('data:')).length;
                     }
                 }
-                if (cData.groups) {
-                    cData.groups.forEach(g => {
-                        let existingGroup = d.groups.find(x => x.name === g.name);
-                        if(existingGroup) existingGroup.items = [...new Set([...existingGroup.items, ...g.items])];
-                        else { const newG = {...g}; delete newG.id; newG.mode = targetCtx; d.groups.push(newG); }
-                    });
-                }
-                if (cData.combinations) {
-                    cData.combinations.forEach(c => {
-                        let existingCombo = d.combos.find(x => x.name === c.name);
-                        if(existingCombo) { existingCombo.elements = c.elements; if(c.image) existingCombo.image = c.image; }
-                        else { const newC = {...c}; delete newC.id; newC.mode = targetCtx; d.combos.push(newC); }
-                    });
-                }
 
-                saveContextCore(targetCtx); saveGroups(targetCtx); saveCombos(targetCtx);
-
-                if(cData.images && Object.keys(cData.images).length > 0) {
-                    const keys = Object.keys(cData.images);
-                    const tx = db.transaction([STORE_IMG], 'readwrite');
-                    const st = tx.objectStore(STORE_IMG);
-                    
-                    for(const name of keys) {
-                        let arrData = Array.isArray(cData.images[name]) ? cData.images[name] : [cData.images[name]];
-                        st.put({id: `${targetCtx}_${name}`, mode: targetCtx, name: name, imageData: arrData});
-                        d.imageCount.set(name, arrData.length);
+                // 2. 将旧的 Base64 乱码全部转换为物理文件
+                if (data.images) {
+                    for (const [imgKey, imgArray] of Object.entries(data.images)) {
+                        const firstUnder = imgKey.indexOf('_');
+                        const ctx = firstUnder > -1 ? imgKey.substring(0, firstUnder) : getContext();
+                        const itemName = firstUnder > -1 ? imgKey.substring(firstUnder + 1) : imgKey;
                         
-                        if(!d.metadata[name]) d.metadata[name] = {tags:[]};
-                        d.metadata[name].imgCount = arrData.length;
+                        let newImgUrls = [];
+                        for (let i = 0; i < imgArray.length; i++) {
+                            const imgData = imgArray[i];
+                            if (imgData.startsWith('data:image/') || imgData.length > 1000) {
+                                processedImages++;
+                                updateProgress((processedImages / Math.max(totalImages, 1)) * 50, '正在转换并保存为本地物理图片...', `${processedImages} / ${totalImages}`);
+                                
+                                const safeName = sanitizePrompt(itemName).replace(/[^a-zA-Z0-9]/g, '');
+                                const res = await fetch('/api/prompt-manager/upload', {
+                                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({ image: imgData, filename: `import_${safeName}_${Date.now()}_${i}.png`, subfolder: ctx })
+                                });
+                                const json = await res.json();
+                                if(json.success) newImgUrls.push(json.url);
+                            } else {
+                                // 本来就是新版的网址，直接保留
+                                newImgUrls.push(imgData);
+                            }
+                        }
+                        data.images[imgKey] = newImgUrls; // 替换为干净的物理网址
                     }
-                    d.metadata._v39Migrated = true;
-                    saveMetadata(targetCtx);
+                }
 
-                    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+                // 3. 开始合并文本数据
+                updateProgress(60, '正在合并提示词与配置数据...');
+                for (let oldCtx of Object.keys(data.contexts)) {
+                    const cData = data.contexts[oldCtx];
+                    let targetCtx = oldCtx;
+                    
+                    if (targetStrategy === 'current_tab') {
+                        let oldModeId = oldCtx.includes('_') ? oldCtx.substring(oldCtx.indexOf('_') + 1) : oldCtx;
+                        targetCtx = `${currentModelId}_${oldModeId}`;
+                        
+                        if (!MODELS[currentModelId].modes[oldModeId]) {
+                            const catId = MODELS[currentModelId].categories[0]?.id || 'custom';
+                            const mName = cData.modeInfo ? cData.modeInfo.name : oldModeId;
+                            const mIcon = cData.modeInfo ? cData.modeInfo.icon : '📁';
+                            MODELS[currentModelId].modes[oldModeId] = { name: mName, icon: mIcon, group: catId };
+                            saveModels();
+                        }
+                    } else if (targetStrategy === 'current_mode') {
+                        targetCtx = getContext();
+                    }
+                    
+                    if (!globalDB.contexts[targetCtx]) {
+                        globalDB.contexts[targetCtx] = { items: [], metadata: {}, cart: [], groups: [], combos: [] };
+                    }
+                    const d = globalDB.contexts[targetCtx];
+                    
+                    if (!isMerge && !clearedCtxs.has(targetCtx)) {
+                        // 如果不合并，先清理目标位置的旧图片
+                        d.items.forEach(item => {
+                            const imgKey = `${targetCtx}_${item}`;
+                            if(globalDB.images[imgKey]) {
+                                globalDB.images[imgKey].forEach(url => deletePhysicalFile(url));
+                                delete globalDB.images[imgKey];
+                            }
+                        });
+                        d.items = []; d.cart = []; d.groups = []; d.combos = []; d.metadata = {};
+                        clearedCtxs.add(targetCtx);
+                    }
+                    
+                    // 合并核心文本属性
+                    const newItems = cData.items.filter(i => !d.items.includes(i));
+                    d.items.push(...newItems);
+                    
+                    const newCart = (cData.cart || []).filter(i => !d.cart.includes(i));
+                    d.cart.push(...newCart);
+                    
+                    if (cData.metadata) {
+                        for (const [k, v] of Object.entries(cData.metadata)) {
+                            if (d.metadata[k]) {
+                                d.metadata[k].tags = [...new Set([...(d.metadata[k].tags||[]), ...(v.tags||[])])];
+                                if(v.remark) d.metadata[k].remark = v.remark;
+                                if(v.cartWeight) d.metadata[k].cartWeight = v.cartWeight;
+                            } else {
+                                d.metadata[k] = v;
+                            }
+                        }
+                    }
+
+                    if (cData.groups) {
+                        cData.groups.forEach(g => {
+                            let existingGroup = d.groups.find(x => x.name === g.name);
+                            if(existingGroup) existingGroup.items = [...new Set([...existingGroup.items, ...g.items])];
+                            else { const newG = {...g}; delete newG.id; newG.mode = targetCtx; d.groups.push(newG); }
+                        });
+                    }
+                    
+                    if (cData.combos) {
+                        cData.combos.forEach(c => {
+                            let existingCombo = d.combos.find(x => x.name === c.name);
+                            if(existingCombo) { existingCombo.elements = c.elements; if(c.image) existingCombo.image = c.image; }
+                            else { const newC = {...c}; delete newC.id; newC.mode = targetCtx; d.combos.push(newC); }
+                        });
+                    }
+                    
+                    // 重新挂载物理化后的图片
+                    for (const item of cData.items) {
+                        const oldImgKey = `${oldCtx}_${item}`;
+                        const newImgKey = `${targetCtx}_${item}`;
+                        if (data.images[oldImgKey] && data.images[oldImgKey].length > 0) {
+                            if (!globalDB.images[newImgKey]) globalDB.images[newImgKey] = [];
+                            globalDB.images[newImgKey].push(...data.images[oldImgKey]);
+                            // 去重
+                            globalDB.images[newImgKey] = [...new Set(globalDB.images[newImgKey])];
+                            d.metadata[item].imgCount = globalDB.images[newImgKey].length;
+                        }
+                    }
                 }
             }
+
+            updateProgress(90, '正在写入本地数据库...');
+            await fetch('/api/prompt-manager/db', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(globalDB)
+            });
             
-            renderSidebarModes();
-            triggerSearch(true);
+// 【修改点】将导入数据后的 reload 替换为本地即时渲染
+            updateProgress(100, '完成！');
             hideProgress();
-            showToast('🎉 数据导入并映射成功！');
+            showToast('🎉 数据导入、转换并映射成功！');
             document.getElementById('importFileInput').value = '';
+
+// 即时加载逻辑，不再刷新整个网页！
+            setTimeout(async () => { 
+                await initDB();              // 1. 重新拉取合并后的数据库
+                renderModelTabs();           // 2. 刷新顶部标签页UI
+                switchModel(currentModelId, true); // 3. 强制重载侧边栏
+                triggerSearch(true);         // 4. 重绘中央网格卡片
+                updateBadges();              // 5. 刷新角标状态
+            }, 500);
 
         } catch(e) {
             console.error(e);
             hideProgress();
-            alert('导入失败！数据写入过程中发生错误。');
+            alert('导入失败！数据转换写入过程中发生错误。');
             document.getElementById('importFileInput').value = '';
         }
     }
 
-    function createBackup() {
-        const ctx = getContext();
-        const name = prompt('备份名称', `Backup_[${MODELS[currentModelId].modes[currentModeId].name}]_`+new Date().toLocaleTimeString()); if(!name) return;
-        const d = contextData[ctx];
-        const bk = { name, mode: ctx, timestamp: Date.now(), items: d.items, cart: d.cart, groups: JSON.parse(JSON.stringify(d.groups)), combos: JSON.parse(JSON.stringify(d.combos)), metadata: JSON.parse(JSON.stringify(d.metadata)) };
-        db.transaction([STORE_BACKUP], 'readwrite').objectStore(STORE_BACKUP).add(bk).onsuccess = () => { openBackupModal(); showToast('已备份当前小分类文本数据'); };
-    }
-    function openBackupModal() {
-        const list = document.getElementById('backupList'); list.innerHTML='';
-        db.transaction([STORE_BACKUP]).objectStore(STORE_BACKUP).index('mode').getAll(getContext()).onsuccess = e => {
-            const res = e.target.result.sort((a,b)=>b.timestamp-a.timestamp);
-            if(!res.length) list.innerHTML = '<div style="color:var(--text-light);text-align:center;">暂无当前小分类的备份</div>';
-            res.forEach(b => {
-                const div = document.createElement('div'); div.className='list-item';
-                div.innerHTML = `<div><b>${escapeHtml(b.name)}</b><br><small style="color:var(--text-light)">${new Date(b.timestamp).toLocaleString()}</small></div>
-                                 <div style="display:flex;gap:5px;">
-                                    <button class="btn btn-outline" style="padding:4px 8px" onclick="restoreBackup(${b.id})">恢复</button>
-                                    <button class="btn btn-danger" style="padding:4px 8px" onclick="delBackup(${b.id})">删除</button>
-                                 </div>`;
-                list.appendChild(div);
+// === 新版全局 ZIP 备份系统 ===
+    async function createBackup() {
+        const name = prompt('请输入备份名称 (自动打包全库配置和图片):', `Backup_${Date.now()}`);
+        if(!name) return;
+        
+        showProgress('正在打包全库数据...', '正在压缩图片和配置，请勿关闭页面');
+        try {
+            const res = await fetch('/api/prompt-manager/backup/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name })
             });
-            showModal('backupModal');
-        };
-    }
-    function restoreBackup(id) {
-        if(!confirm('恢复将覆盖当前小分类的所有文本属性数据（图片不受影响），确定？')) return;
-        db.transaction([STORE_BACKUP]).objectStore(STORE_BACKUP).get(id).onsuccess = e => {
-            const b = e.target.result; 
-            const ctx = getContext();
-            const d = contextData[ctx];
-            d.items=b.items; d.cart=b.cart; d.groups=b.groups; d.combos=b.combos; d.metadata=b.metadata;
-            saveContextCore(ctx); saveGroups(ctx); saveCombos(ctx);
-            hideModal('backupModal'); triggerSearch(true); showToast('已恢复备份');
-        };
-    }
-    function delBackup(id) { db.transaction([STORE_BACKUP], 'readwrite').objectStore(STORE_BACKUP).delete(id).onsuccess = openBackupModal; }
-
-    function showModal(id) { 
-        const el = document.getElementById(id);
-        if(el.style.display !== 'flex') {
-            el.style.display = 'flex'; 
-            if(!activeModals.includes(id)) activeModals.push(id);
+            const json = await res.json();
+            hideProgress();
+            if(json.success) {
+                showToast(`备份成功！文件保存在 backup/${json.filename}`);
+                openBackupModal(); // 刷新列表
+            } else {
+                alert('打包失败: ' + json.error);
+            }
+        } catch(e) {
+            hideProgress();
+            console.error(e);
+            alert('打包请求发送失败');
         }
     }
-    
-    function hideModal(id) { 
-        document.getElementById(id).style.display = 'none'; 
-        activeModals = activeModals.filter(m => m !== id);
+
+    async function openBackupModal() {
+        const list = document.getElementById('backupList'); 
+        list.innerHTML = '<div style="color:var(--text-light);text-align:center;">正在加载备份列表...</div>';
+        showModal('backupModal');
+
+        try {
+            const res = await fetch('/api/prompt-manager/backup/list');
+            const json = await res.json();
+            list.innerHTML = '';
+            
+            if(!json.success || json.backups.length === 0) {
+                list.innerHTML = '<div style="color:var(--text-light);text-align:center;">暂无备份。<br>备份文件存放在插件目录的 backup 文件夹下，请手动清理不需要的备份以节省硬盘空间。</div>';
+                return;
+            }
+
+            const notice = document.createElement('div');
+            notice.style.cssText = "font-size:0.8rem; color:var(--text-light); margin-bottom:10px; text-align:center; background:var(--primary-bg); padding:5px; border-radius:4px;";
+            notice.innerHTML = "注意：恢复备份将覆盖当前的全部数据和图片！<br>不需要的备份请前往插件 backup 目录下手动删除。";
+            list.appendChild(notice);
+
+            json.backups.forEach(b => {
+                const dateStr = new Date(b.time * 1000).toLocaleString();
+                const div = document.createElement('div'); 
+                div.className = 'list-item';
+                div.innerHTML = `
+                    <div style="flex:1; min-width:0;">
+                        <b style="word-break: break-all;">${escapeHtml(b.name)}</b><br>
+                        <small style="color:var(--text-light)">${dateStr} | 大小: ${b.size} MB</small>
+                    </div>
+                    <div style="display:flex;gap:5px;">
+                        <button class="btn btn-danger" style="padding:6px 12px" onclick="restoreBackup('${b.name}')">⚡ 恢复覆盖</button>
+                    </div>`;
+                list.appendChild(div);
+            });
+        } catch(e) {
+            list.innerHTML = '<div style="color:var(--error);text-align:center;">加载失败</div>';
+        }
     }
-    
+
+    async function restoreBackup(filename) {
+        if(!confirm(`⚠️ 极度危险操作！\n\n您确定要恢复 [${filename}] 吗？\n\n这将会清空当前的所有数据和图片，完全回退到该备份的状态！`)) return;
+        
+        showProgress('正在恢复全库数据...', '正在解压并覆盖当前数据，请稍候');
+        try {
+            const res = await fetch('/api/prompt-manager/backup/restore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: filename })
+            });
+            const json = await res.json();
+            
+            if(json.success) {
+                updateProgress(100, '恢复成功，正在重启界面...');
+                setTimeout(() => { location.reload(); }, 1000);
+            } else {
+                hideProgress();
+                alert('恢复失败: ' + json.error);
+            }
+        } catch(e) {
+            hideProgress();
+            console.error(e);
+            alert('恢复请求发送失败');
+        }
+    }
+
+    function showModal(id) { const el = document.getElementById(id); if(el.style.display !== 'flex') { el.style.display = 'flex'; if(!activeModals.includes(id)) activeModals.push(id); } }
+    function hideModal(id) { document.getElementById(id).style.display = 'none'; activeModals = activeModals.filter(m => m !== id); }
     function fsImg(src) { document.getElementById('fsImage').src = src; showModal('fullscreenOverlay'); }
     function showToast(msg) { const t = document.getElementById('toast'); t.innerText=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2000); }
     function openCompressModal() {
@@ -3555,36 +2921,20 @@
         showModal('compressImagesModal');
     }
     function saveCompress() { compressSettings.quality = document.getElementById('qlSlider').value/100; compressSettings.maxWidth = parseInt(document.getElementById('mwSlider').value); saveSettings(); hideModal('compressImagesModal'); showToast('设置已保存'); }
-    function refreshUI() { 
-        triggerSearch(true).then(() => showToast('界面与缓存已刷新')); 
-    }
+    function refreshUI() { triggerSearch(true).then(() => showToast('界面与缓存已刷新')); }
     
     function setupListeners() {
         let isComposing = false;
         document.getElementById('searchInput').addEventListener('compositionstart', () => { isComposing = true; });
-        document.getElementById('searchInput').addEventListener('compositionend', () => {
-            isComposing = false;
-            performSearch();
-        });
-        document.getElementById('searchInput').oninput = () => {
-            if (!isComposing) performSearch();
-        };
-
+        document.getElementById('searchInput').addEventListener('compositionend', () => { isComposing = false; performSearch(); });
+        document.getElementById('searchInput').oninput = () => { if (!isComposing) performSearch(); };
         document.getElementById('remarkFilter').oninput = performSearch; 
         document.getElementById('tagFilter').oninput = performSearch;
         document.getElementById('imageStatusFilter').onchange = performSearch;
         document.getElementById('sortSelect').onchange = performSearch;
         document.getElementById('searchScope').onchange = () => { triggerSearch(true); };
-        
-        document.getElementById('cardScaleSlider').oninput = function() { 
-            updateGridLayout();
-            renderItems(false);
-        };
-
-        window.addEventListener('resize', () => {
-            updateGridLayout();
-            renderItems(false);
-        });
+        document.getElementById('cardScaleSlider').oninput = function() { updateGridLayout(); renderItems(false); };
+        window.addEventListener('resize', () => { updateGridLayout(); renderItems(false); });
         
         document.addEventListener('keydown', e => {
             if(e.ctrlKey || e.metaKey) {
@@ -3594,12 +2944,7 @@
                     case 'e': e.preventDefault(); exportCartToPrompt(); break;
                 }
             }
-            if(e.key === 'Escape') {
-                if(activeModals.length > 0) {
-                    const topModal = activeModals[activeModals.length - 1];
-                    hideModal(topModal);
-                }
-            }
+            if(e.key === 'Escape') { if(activeModals.length > 0) { const topModal = activeModals[activeModals.length - 1]; hideModal(topModal); } }
         });
         
         document.getElementById('batchFileInput').onchange = function() {
@@ -3607,7 +2952,6 @@
             Array.from(this.files).slice(0, 10).forEach(f => { const d=document.createElement('div'); d.innerText=f.name; list.appendChild(d); });
             if(this.files.length>10) list.innerHTML+=`<div>... 等共 ${this.files.length} 个文件</div>`;
         };
-
         document.getElementById('txtFileInput').onchange = function() {
             if(this.files.length > 0) document.getElementById('txtFileInfo').innerText = '已选择: ' + this.files[0].name;
             else document.getElementById('txtFileInfo').innerText = '';
@@ -3615,23 +2959,9 @@
 
         window.addEventListener('scroll', () => {
             const topBtn = document.getElementById('scrollTopBtn');
-            if (window.scrollY > 400) {
-                topBtn.style.display = 'flex';
-            } else {
-                topBtn.style.display = 'none';
-            }
-            
-            if (!isScrollTicking) {
-                window.requestAnimationFrame(() => {
-                    renderItems(false); 
-                    isScrollTicking = false;
-                });
-                isScrollTicking = true;
-            }
-
-            if (batchMode && isMarqueeActive) {
-                updateMarquee(lastClientX + window.scrollX, lastClientY + window.scrollY);
-            }
+            if (window.scrollY > 400) topBtn.style.display = 'flex'; else topBtn.style.display = 'none';
+            if (!isScrollTicking) { window.requestAnimationFrame(() => { renderItems(false); isScrollTicking = false; }); isScrollTicking = true; }
+            if (batchMode && isMarqueeActive) updateMarquee(lastClientX + window.scrollX, lastClientY + window.scrollY);
         });
     }
 </script>
